@@ -1,0 +1,31 @@
+{
+  "name": "farmledger",
+  "version": "1.0.0",
+  "description": "FarmLedger - decentralised parametric micro-insurance for Rwandan smallholders (capstone prototype)",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "test:gas": "cross-env REPORT_GAS=true hardhat test",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "seed": "hardhat run scripts/seed-demo.js --network localhost",
+    "oracle": "node services/oracle.js",
+    "notify": "node services/notifier.js",
+    "ussd": "node services/ussd.js",
+    "bench": "hardhat run benchmark/benchmark.js",
+    "slither": "slither . --hardhat-ignore-compile --filter-paths node_modules",
+    "web:install": "npm --prefix web install",
+    "web": "npm --prefix web run dev"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "5.0.2",
+    "cross-env": "^7.0.3",
+    "dotenv": "^16.4.5",
+    "hardhat": "^2.22.15"
+  },
+  "dependencies": {
+    "ethers": "^6.13.4"
+  }
+}
