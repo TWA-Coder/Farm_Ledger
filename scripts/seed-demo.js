@@ -1,0 +1,90 @@
+// Seeds the local chain with demo data so the web app has something to show.
+// Run after deploy:local.   npm run seed
+const fs = require("fs");
+const path = require("path");
+const { ethers } = require("hardhat");
+const contacts = require("../web/server/contacts");
+
+const b32 = (s) => ethers.encodeBytes32String(s);
+const h = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
+
+async function main() {
+  const info = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "deployments", "localhost.json")));
+  const signers = await ethers.getSigners();
+  const [, underwriter, , , aline, jean] = signers;
+  const government = signers[12]; // premium-subsidy programme (deploy.js grants SUBSIDY_ROLE)
+  const reviewer = signers[11];   // the insurer's claims officer (second reviewer for crop loss claims)
+  const ledger = await ethers.getContractAt("FarmLedger", info.ledger);
+  const token = await ethers.getContractAt("MockRWF", info.token);
+  const ledgerAddr = info.ledger;
+
+  // funds
+  await (await token.mint(underwriter.address, 20_000_000)).wait();
+  await (await token.mint(aline.address, 2_000_000)).wait();
+  await (await token.mint(jean.address, 2_000_000)).wait();
+  await (await token.connect(underwriter).approve(ledgerAddr, ethers.MaxUint256)).wait();
+  await (await token.connect(aline).approve(ledgerAddr, ethers.MaxUint256)).wait();
+  await (await token.connect(jean).approve(ledgerAddr, ethers.MaxUint256)).wait();
+  await (await ledger.connect(underwriter).depositLiquidity(10_000_000)).wait();
+
+  // products (rainfall = 0.1 mm over trailing 30 days, NDVI x 10000)
+  await (await ledger.connect(underwriter).createProduct(0, 1500, 1000, 120)).wait(); // 1 Drought  < 150 mm
+  await (await ledger.connect(underwriter).createProduct(1, 3500, 800, 120)).wait();  // 2 Flood    > 350 mm
+  await (await ledger.connect(underwriter).createProduct(2, 3000, 800, 120)).wait();  // 3 Low NDVI < 0.30
+  await (await ledger.connect(underwriter).createProduct(3, 0, 500, 365)).wait();     // 4 Livestock mortality
+  // extra trigger levels the farmer can choose (level 0 is the one above)
+  await (await ledger.connect(underwriter).addTriggerLevel(1, 1200, 700)).wait();  // drought, stricter: < 120 mm at 7%
+  await (await ledger.connect(underwriter).addTriggerLevel(1, 1800, 1400)).wait(); // drought, wider:    < 180 mm at 14%
+  await (await ledger.connect(underwriter).addTriggerLevel(2, 4000, 500)).wait();  // flood, stricter:   > 400 mm at 5%
+  await (await ledger.connect(underwriter).addTriggerLevel(2, 3000, 1200)).wait(); // flood, wider:      > 300 mm at 12%
+  await (await ledger.connect(underwriter).addTriggerLevel(3, 4000, 1200)).wait(); // crop health, wider: NDVI < 0.40 at 12%
+
+  // Aline - maize in Bugesera (Eastern Province), one dairy cow
+  await (await ledger.connect(aline).registerFarmer(h("1199080012345678"), h("250788000001"))).wait();
+  contacts.put(aline.address, "250788000001"); // plain number for SMS, off-chain (the chain has only its hash)
+  await (await ledger.connect(aline).registerPlot(-2_150_000, 30_150_000, 5000, b32("MAIZE"), h("geojson-aline-plot-1"))).wait();
+  await (await ledger.connect(aline).registerAnimal(b32("RW-TAG-0001"), b32("FRIESIAN"), 2021, h("photo-cow-1"))).wait();
+
+  // Jean - beans in Nyagatare, one dairy cow
+  await (await ledger.connect(jean).registerFarmer(h("1198570087654321"), h("250788000002"))).wait();
+  contacts.put(jean.address, "250788000002");
+  await (await ledger.connect(jean).registerPlot(-1_300_000, 30_300_000, 8000, b32("BEANS"), h("geojson-jean-plot-1"))).wait();
+  await (await ledger.connect(jean).registerAnimal(b32("RW-TAG-0002"), b32("CROSSBREED"), 2020, h("photo-cow-2"))).wait();
+
+  // Government premium subsidy (Rwanda NAIS pays 40% of the premium), all four products, at most 200,000 per farmer.
+  await (await token.mint(government.address, 5_000_000)).wait();
+  await (await token.connect(government).approve(ledgerAddr, ethers.MaxUint256)).wait();
+  await (await ledger.connect(government).fundSubsidy(5_000_000)).wait();
+  await (await ledger.connect(government).setSubsidy(4000, 200_000)).wait();
+  for (const id of [1, 2, 3, 4]) await (await ledger.connect(government).setSubsidyEligible(id, true)).wait();
+
+  // Crop loss claims: decided by 2 of {underwriter, claims officer}.
+  if (info.cropClaims) {
+    const claims = await ethers.getContractAt("CropClaims", info.cropClaims);
+    await (await claims.connect(underwriter).setReviewer(reviewer.address, true)).wait();
+    await (await claims.connect(underwriter).setReviewQuorum(2)).wait();
+  }
+
+  // Insurance agents appointed by the underwriter, by district. Farmers do not book cover: their agent submits the
+  // application, the underwriter drafts the contract, the farmer accepts and pays (PolicyDesk).
+  if (info.policyDesk) {
+    const desk = await ethers.getContractAt("PolicyDesk", info.policyDesk);
+    const [eric, claudine] = [signers[15], signers[16]];
+    const D = (...names) => names.map((n) => b32(n.toUpperCase()));
+    await (await desk.connect(underwriter).appointAgent(eric.address, D("Bugesera", "Kayonza", "Rwamagana"))).wait();
+    await (await desk.connect(underwriter).appointAgent(claudine.address, D("Nyagatare", "Huye", "Musanze"))).wait();
+    contacts.put(eric.address, "250788000015");     // agents get SMS too (demo numbers: never texted live)
+    contacts.put(claudine.address, "250788000016");
+    await (await desk.connect(aline).join(b32("BUGESERA"))).wait();  // -> Eric
+    await (await desk.connect(jean).join(b32("NYAGATARE"))).wait();  // -> Claudine
+  }
+
+  // For the demo the livestock waiting period is shortened to 0 (production default: 7 days).
+  await (await ledger.setWaitingPeriod(0)).wait();
+
+  console.log("Seeded: 4 products (with trigger levels), 2 farmers (Aline, Jean), 2 plots, 2 cows, 10,000,000 mRWF liquidity,");
+  console.log("        40% premium subsidy (5,000,000 mRWF pool, 200,000 cap per farmer), crop claim reviewers 2-of-2,");
+  console.log("        agents Eric (Bugesera, Kayonza, Rwamagana; Aline) and Claudine (Nyagatare, Huye, Musanze; Jean).");
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });
