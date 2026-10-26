@@ -1,0 +1,15 @@
+{
+  "network": "localhost",
+  "chainId": 31337,
+  "rpcUrl": "http://127.0.0.1:8545",
+  "token": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "ledger": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  "roles": {
+    "admin": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "underwriter": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "oracle": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "vet": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+    "claimsAgent": "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"
+  },
+  "deployedAt": "2026-10-25T17:47:03.594Z"
+}
