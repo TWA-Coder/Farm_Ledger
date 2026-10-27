@@ -1,5 +1,6 @@
 'use strict';
 
+const path = require('path');
 const scan = require('./scan');
 const parse = require('./parse');
 const utils = require('./utils');
@@ -20,18 +21,6 @@ const isObject = val => val && typeof val === 'object' && !Array.isArray(val);
  * const isMatch = picomatch('*.!(*a)');
  * console.log(isMatch('a.a')); //=> false
  * console.log(isMatch('a.b')); //=> true
- *
- * // For environments without `node.js`, `picomatch/posix` provides you a dependency-free matcher, without automatic OS detection.
- * const picomatch = require('picomatch/posix');
- * // the same API, defaulting to posix paths
- * const isMatch = picomatch('a/*');
- * console.log(isMatch('a\\b')); //=> false
- * console.log(isMatch('a/b')); //=> true
- *
- * // you can still configure the matcher function to accept windows paths
- * const isMatch = picomatch('a/*', { options: windows });
- * console.log(isMatch('a\\b')); //=> true
- * console.log(isMatch('a/b')); //=> true
  * ```
  * @name picomatch
  * @param {String|Array} `globs` One or more glob patterns.
@@ -60,7 +49,7 @@ const picomatch = (glob, options, returnState = false) => {
   }
 
   const opts = options || {};
-  const posix = opts.windows;
+  const posix = utils.isWindows(options);
   const regex = isState
     ? picomatch.compileRe(glob, options)
     : picomatch.makeRe(glob, options, false, true);
@@ -169,9 +158,9 @@ picomatch.test = (input, regex, options, { glob, posix } = {}) => {
  * @api public
  */
 
-picomatch.matchBase = (input, glob, options, posix = options && options.windows) => {
+picomatch.matchBase = (input, glob, options, posix = utils.isWindows(options)) => {
   const regex = glob instanceof RegExp ? glob : picomatch.makeRe(glob, options);
-  return regex.test(utils.basename(input, { windows: posix }));
+  return regex.test(path.basename(input));
 };
 
 /**
@@ -245,14 +234,6 @@ picomatch.scan = (input, options) => scan(input, options);
  * Compile a regular expression from the `state` object returned by the
  * [parse()](#parse) method.
  *
- * ```js
- * const picomatch = require('picomatch');
- * const state = picomatch.parse('*.js');
- * // picomatch.compileRe(state[, options]);
- *
- * console.log(picomatch.compileRe(state));
- * //=> /^(?:(?!\.)(?=.)[^/]*?\.js)$/
- * ```
  * @param {Object} `state`
  * @param {Object} `options`
  * @param {Boolean} `returnOutput` Intended for implementors, this argument allows you to return the raw output from the parser.
@@ -288,10 +269,10 @@ picomatch.compileRe = (state, options, returnOutput = false, returnState = false
  *
  * ```js
  * const picomatch = require('picomatch');
- * // picomatch.makeRe(state[, options]);
+ * const state = picomatch.parse('*.js');
+ * // picomatch.compileRe(state[, options]);
  *
- * const result = picomatch.makeRe('*.js');
- * console.log(result);
+ * console.log(picomatch.compileRe(state));
  * //=> /^(?:(?!\.)(?=.)[^/]*?\.js)$/
  * ```
  * @param {String} `state` The object returned from the `.parse` method.

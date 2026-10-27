@@ -1,0 +1,12 @@
+
+.env
+artifacts/
+cache/
+coverage/
+node_modules/
+services/out/
+typechain-types/
+web/.data/
+web/.next/
+web/node_modules/
+'Claude outputs'/
