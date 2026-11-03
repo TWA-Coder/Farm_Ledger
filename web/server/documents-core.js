@@ -43,6 +43,19 @@ function verifySigner(msg, signature, expected) {
   return signer;
 }
 
+// Like verifySigner, but `expected` may also be an ERC-4337 smart account (farmers): then the signature must come
+// from the account's on-chain owner. ownerOf(address) -> owner address or null (no contract / no owner()).
+async function verifyAccountSigner(msg, signature, expected, ownerOf) {
+  const { verifyMessage } = require("ethers");
+  let signer;
+  try { signer = verifyMessage(msg, signature); } catch { throw new DocError(401, "Invalid signature."); }
+  if (signer.toLowerCase() === String(expected).toLowerCase()) return signer;
+  let owner = null;
+  try { owner = ownerOf ? await ownerOf(expected) : null; } catch { owner = null; }
+  if (owner && owner.toLowerCase() === signer.toLowerCase()) return expected;
+  throw new DocError(403, "Signature does not match the applicant.");
+}
+
 function checkIssued(issued, nowSeconds = Math.floor(Date.now() / 1000)) {
   const n = Number(issued);
   if (!Number.isInteger(n) || Math.abs(nowSeconds - n) > MAX_SKEW_SECONDS) throw new DocError(401, "Request expired. Check your device clock and try again.");
@@ -152,6 +165,20 @@ class DocumentStore {
     return { applicationHash: hash, record };
   }
 
+  // The finalized application that was linked to a policy (null if none). Scans the applicant's folders.
+  findForPolicy({ applicant, policyId }) {
+    if (!ADDRESS_RE.test(applicant || "")) throw new DocError(400, "Invalid applicant.");
+    const base = path.join(this.root, String(applicant).toLowerCase());
+    if (!fs.existsSync(base)) return null;
+    for (const dir of fs.readdirSync(base)) {
+      const f = path.join(base, dir, "application.json");
+      if (!APP_ID_RE.test(dir) || !fs.existsSync(f)) continue;
+      const rec = JSON.parse(fs.readFileSync(f, "utf8"));
+      if (Number(rec.policyId) === Number(policyId)) return rec;
+    }
+    return null;
+  }
+
   link({ applicant, application, policyId }) {
     checkIds({ applicant, application });
     const f = path.join(this.dirFor(applicant, application, "application"), "application.json");
@@ -167,4 +194,4 @@ class DocumentStore {
 
 function defaultRoot() { return process.env.UPLOAD_DIR || path.join(process.cwd(), ".data", "uploads"); }
 
-module.exports = { DocError, DocumentStore, sniff, sha256Hex, safeName, message, verifySigner, checkIssued, checkIds, inspectUpload, defaultRoot, MAX_SKEW_SECONDS };
+module.exports = { DocError, DocumentStore, sniff, sha256Hex, safeName, message, verifySigner, verifyAccountSigner, checkIssued, checkIds, inspectUpload, defaultRoot, MAX_SKEW_SECONDS };

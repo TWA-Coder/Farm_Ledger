@@ -2,6 +2,7 @@
 // Browser side of document handling: local validation, signed API calls.
 import requirements from "../shared/requirements";
 import signing from "../shared/signing";
+import claims from "../shared/claims";
 
 const { LIMITS } = requirements;
 export const MAX_MB = LIMITS.maxBytes / 1024 / 1024;
@@ -81,11 +82,34 @@ export async function linkApplication(signer, applicant, application, policyId) 
   }));
 }
 
-// Open a document that is stored on the server (e.g. the ID already on file) in a new tab.
-export async function viewStored(signer, applicant, application, document) {
+// Download a stored document. `asReviewer`: the signer is not the applicant (a certified vet viewing claim evidence).
+export async function fetchStored(signer, applicant, application, document, { asReviewer = false } = {}) {
   const { issued, signature } = await signed(signer, { action: "view", applicant, application, document });
   const q = new URLSearchParams({ applicant, issued: String(issued), signature });
+  if (asReviewer) q.set("signer", await signer.getAddress());
   const res = await fetch(`/api/applications/${application}/documents/${document}?${q}`, { cache: "no-store" });
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not open the document.");
-  window.open(URL.createObjectURL(await res.blob()), "_blank", "noopener");
+  return res.blob();
+}
+
+// Open a document that is stored on the server (e.g. the ID already on file) in a new tab.
+export async function viewStored(signer, applicant, application, document) {
+  window.open(URL.createObjectURL(await fetchStored(signer, applicant, application, document)), "_blank", "noopener");
+}
+
+// Livestock claim: upload the photo first, then its SHA-256 becomes the claim's on-chain evidence hash.
+export async function uploadClaimEvidence(signer, applicant, policyId, file) {
+  const sha = await sha256Hex(file);
+  const evidenceHash = claims.evidenceHashFromSha(sha);
+  await uploadDocument(signer, applicant, claims.claimApplicationId(policyId, evidenceHash), claims.EVIDENCE_DOCUMENT, file, sha);
+  return evidenceHash;
+}
+
+// After registration: give the portal the plain phone number so SMS notifications can reach the farmer.
+// The server only accepts it if it matches the phone fingerprint recorded on-chain.
+export async function saveContact(signer, address, phone) {
+  const issued = now();
+  const msg = signing.message({ action: "contact", applicant: address, application: "contact-details", document: phone, issued });
+  const signature = await signer.signMessage(msg);
+  return parse(await fetch("/api/contacts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address, phone, issued, signature }) }));
 }

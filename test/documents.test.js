@@ -40,7 +40,7 @@ describe("Application documents", function () {
       req.FIELDS.push({ id: "t_declaration", label: "I confirm the information is correct", type: "checkbox", required: true });
       try {
         assert.ok(req.validateAnswers({ cover: 0 }, {}).t_declaration);
-        assert.deepStrictEqual(req.validateAnswers({ cover: 0 }, { t_declaration: true }), {});
+        assert.strictEqual(req.validateAnswers({ cover: 0 }, { t_declaration: true }).t_declaration, undefined);
       } finally { req.FIELDS.pop(); }
     });
   });
@@ -99,32 +99,33 @@ describe("Application documents", function () {
 
   describe("finalize and link", () => {
     const ctx = { cover: 3, productId: 4, assetId: 1, sumInsured: "300000" };
+    const answers = { full_name: "Test Farmer", id_number: "1199080012345678", district_sector: "Bugesera, Mayange", declaration: true };
     const put = (document, buffer) => store.put({ applicant: ALICE, application: APP, document, buffer, originalName: document + ".pdf" });
 
     it("refuses to finalize while mandatory documents are missing", () => {
       put("national_id", JPG);
-      throwsStatus(() => store.finalize({ applicant: ALICE, application: APP, ctx }), 422);
+      throwsStatus(() => store.finalize({ applicant: ALICE, application: APP, ctx, answers }), 422);
     });
     it("finalizes a complete application and returns a stable hash", () => {
       put("national_id", JPG); put("animal_photo", PNG); put("health_cert", PDF);
-      const a = store.finalize({ applicant: ALICE, application: APP, ctx });
-      const b = store.finalize({ applicant: ALICE, application: APP, ctx });
+      const a = store.finalize({ applicant: ALICE, application: APP, ctx, answers });
+      const b = store.finalize({ applicant: ALICE, application: APP, ctx, answers });
       assert.match(a.applicationHash, /^0x[0-9a-f]{64}$/);
       assert.strictEqual(a.applicationHash, b.applicationHash);
       assert.strictEqual(a.record.documents.length, 3);
     });
     it("changes the hash if a document is replaced or the sum insured changes", () => {
       put("national_id", JPG); put("animal_photo", PNG); put("health_cert", PDF);
-      const base = store.finalize({ applicant: ALICE, application: APP, ctx }).applicationHash;
+      const base = store.finalize({ applicant: ALICE, application: APP, ctx, answers }).applicationHash;
       put("health_cert", Buffer.concat([PDF, Buffer.from("x")]));
-      const replaced = store.finalize({ applicant: ALICE, application: APP, ctx }).applicationHash;
-      const sum = store.finalize({ applicant: ALICE, application: APP, ctx: { ...ctx, sumInsured: "400000" } }).applicationHash;
+      const replaced = store.finalize({ applicant: ALICE, application: APP, ctx, answers }).applicationHash;
+      const sum = store.finalize({ applicant: ALICE, application: APP, ctx: { ...ctx, sumInsured: "400000" }, answers }).applicationHash;
       assert.notStrictEqual(base, replaced);
       assert.notStrictEqual(replaced, sum);
     });
     it("links the application to a policy exactly once", () => {
       put("national_id", JPG); put("animal_photo", PNG); put("health_cert", PDF);
-      store.finalize({ applicant: ALICE, application: APP, ctx });
+      store.finalize({ applicant: ALICE, application: APP, ctx, answers });
       assert.strictEqual(store.link({ applicant: ALICE, application: APP, policyId: 7 }).policyId, 7);
       throwsStatus(() => store.link({ applicant: ALICE, application: APP, policyId: 8 }), 409);
     });

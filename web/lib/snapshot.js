@@ -16,7 +16,10 @@ export async function loadSnapshot({ ctx, provider, cfg, address, account }) {
     ledger.getFarmer(address), token.balanceOf(address), ledger.productCount(), ledger.plotCount(),
   ]);
   const products = [];
-  for (let i = 1; i <= Number(productCount); i++) products.push({ id: i, ...pick(await ledger.getProduct(i)) });
+  for (let i = 1; i <= Number(productCount); i++) {
+    const levels = (await ledger.getTriggerLevels(i)).map((l, level) => ({ level, threshold: l.threshold, rateBps: l.rateBps }));
+    products.push({ id: i, ...pick(await ledger.getProduct(i)), levels });
+  }
 
   const [plotIds, animalIds, policyIds] = await Promise.all([ledger.plotsOf(address), ledger.animalsOf(address), ledger.policiesOf(address)]);
   const plots = await Promise.all(plotIds.map(async (id) => ({ id: Number(id), ...pick(await ledger.getPlot(id)) })));
@@ -25,7 +28,7 @@ export async function loadSnapshot({ ctx, provider, cfg, address, account }) {
 
   const logs = await provider.getLogs({ address: cfg.dep.ledger, fromBlock: 0, toBlock: "latest" });
   const events = logs.map((l) => {
-    try { const p = ledger.interface.parseLog(l); return { name: p.name, args: p.args, block: l.blockNumber, idx: l.index }; } catch { return null; }
+    try { const p = ledger.interface.parseLog(l); return { name: p.name, args: p.args, block: l.blockNumber, idx: l.index, tx: l.transactionHash }; } catch { return null; }
   }).filter(Boolean);
 
   // every livestock claim, with its signature trail
@@ -42,6 +45,8 @@ export async function loadSnapshot({ ctx, provider, cfg, address, account }) {
       id, ...c, status: Number(c.status), quorum: Number(c.quorum), approvals: Number(c.approvals), rejections: Number(c.rejections),
       holder: pol.holder, tag: fromB32(an.tagId), tagId: an.tagId, sum: pol.sumInsured, attestations,
       iSigned: attestations.some((a) => a.vet.toLowerCase() === address.toLowerCase()),
+      viaUssd: events.some((x) => x.name === "ClaimChannel" && Number(x.args.claimId) === id && x.args.viaAgent),
+      settledAt: events.find((x) => x.name === "ClaimSettled" && Number(x.args.claimId) === id)?.block ?? null,
     });
   }
   claims.sort((a, b) => b.id - a.id);
@@ -61,6 +66,21 @@ export async function loadSnapshot({ ctx, provider, cfg, address, account }) {
   const poolOwner = account.role === "underwriter" ? address : uwAcct.addr;
   const ps = await ledger.poolStats(poolOwner);
   const pool = { balance: ps.balance, reserved: ps.reserved, available: ps.available, premiums: ps.stats.premiums, paidOut: ps.stats.paidOut, sold: ps.stats.policiesSold, payouts: ps.stats.payouts };
+
+  // Latest weather / vegetation reading per plot of this account, with where it came from (see /api/readings).
+  let sources = {};
+  try { sources = (await (await fetch("/api/readings", { cache: "no-store" })).json()).sources || {}; } catch { /* portal API down: sources unknown */ }
+  const readingEvents = events.filter((x) => x.name === "ReadingPosted");
+  for (const pl of plots) {
+    pl.readings = {};
+    for (const metric of [0, 1]) {
+      const r = pick(await ledger.getLatestReading(pl.id, metric));
+      if (!Number(r.postedAt)) { pl.readings[metric] = null; continue; }
+      const ev = [...readingEvents].reverse().find((x) => Number(x.args.plotId) === pl.id && Number(x.args.metric) === metric);
+      const tx = ev?.tx?.toLowerCase();
+      pl.readings[metric] = { value: Number(r.value), observedAt: Number(r.observedAt), postedAt: Number(r.postedAt), tx, source: (tx && sources[tx]) || "test" };
+    }
+  }
 
   const [allowance, paused, waiting] = await Promise.all([token.allowance(address, cfg.dep.ledger), ledger.paused(), ledger.waitingPeriod()]);
   return {

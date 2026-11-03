@@ -1,17 +1,18 @@
 "use client";
 import { ethers } from "ethers";
+import plainErrors from "../shared/errors";
 
 // Well-known Hardhat development keys (public; local chain only). Real users would use a wallet / account abstraction.
 export const DEMO_ACCOUNTS = [
   { key: "admin", label: "Admin", role: "admin", pk: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" },
-  { key: "underwriter", label: "Underwriter (Old Mutual demo)", role: "underwriter", pk: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" },
+  { key: "underwriter", label: "Underwriter (demo insurer)", role: "underwriter", pk: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" },
   { key: "oracle", label: "Oracle", role: "oracle", pk: "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a" },
   { key: "vet", label: "Dr. Mukamana (Vet 1)", role: "vet", pk: "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6", license: "RVC-LIC-001" },
   { key: "vet2", label: "Dr. Habimana (Vet 2)", role: "vet", pk: "0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356", license: "RVC-LIC-002" },
   { key: "vet3", label: "Dr. Uwase (Vet 3)", role: "vet", pk: "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97", license: "RVC-LIC-003" },
   { key: "aline", label: "Aline (Farmer, Bugesera)", role: "farmer", pk: "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a", phone: "250788000001", nid: "1199080012345678" },
   { key: "jean", label: "Jean (Farmer, Nyagatare)", role: "farmer", pk: "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba", phone: "250788000002", nid: "1198570087654321" },
-  { key: "new", label: "New farmer (unregistered)", role: "farmer", pk: "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e", phone: "250788000003", nid: "1199512345678901" },
+  { key: "new", label: "New farmer (starts unregistered)", role: "farmer", pk: "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e", phone: "250788000003", nid: "1199512345678901" },
 ];
 
 // Derive public addresses once so views can recognise demo accounts.
@@ -30,11 +31,14 @@ export async function loadConfig() {
 }
 
 export function makeProvider(dep) {
-  return new ethers.JsonRpcProvider(dep.rpcUrl, undefined, { staticNetwork: true });
+  // cacheTimeout -1: ethers otherwise caches identical requests for 250 ms, so two transactions sent back to back
+  // (approve, then buy) would read the same nonce and the second would fail with "nonce has already been used".
+  return new ethers.JsonRpcProvider(dep.rpcUrl, undefined, { staticNetwork: true, cacheTimeout: -1 });
 }
 
-export function contractsFor(cfg, provider, pk) {
-  const signer = pk ? new ethers.Wallet(pk, provider) : provider;
+// pkOrSigner: a test-account private key, or a ready signer (smart account, browser wallet)
+export function contractsFor(cfg, provider, pkOrSigner) {
+  const signer = typeof pkOrSigner === "string" ? new ethers.Wallet(pkOrSigner, provider) : pkOrSigner || provider;
   return {
     signer,
     ledger: new ethers.Contract(cfg.dep.ledger, cfg.abi.ledger, signer),
@@ -50,7 +54,11 @@ export const fmt = (n) => Number(n).toLocaleString("en-US");
 export const fmtDate = (ts) => new Date(Number(ts) * 1000).toLocaleDateString("en-GB");
 
 export function errMsg(e) {
-  return e?.revert?.name || e?.shortMessage || e?.reason || e?.message || String(e);
+  const name = e?.revert?.name;
+  if (name && plainErrors.PLAIN[name]) return plainErrors.PLAIN[name];
+  const m = e?.shortMessage || e?.reason || e?.message || String(e);
+  if (/ECONNREFUSED|failed to fetch|could not detect network|network error/i.test(m)) return "Cannot reach the FarmLedger network. Check that the test chain is running.";
+  return name || m;
 }
 
 // Local-chain demo controls

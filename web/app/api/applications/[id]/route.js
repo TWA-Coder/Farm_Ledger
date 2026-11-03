@@ -14,7 +14,7 @@ export async function POST(request, { params }) {
     const application = params.id;
     core.checkIds({ applicant: b.applicant, application });
     const payloadHash = sha256Hex(Buffer.from(JSON.stringify({ ctx: b.ctx, answers: b.answers || {} })));
-    authenticate({ action: "submit", applicant: b.applicant, application, sha256: payloadHash, issued: b.issued, signature: b.signature });
+    await authenticate({ action: "submit", applicant: b.applicant, application, sha256: payloadHash, issued: b.issued, signature: b.signature });
     const { applicationHash, record } = store.finalize({ applicant: b.applicant, application, ctx: b.ctx, answers: b.answers || {} });
     return json({ applicationHash, documents: record.documents });
   } catch (e) { return fail(e); }
@@ -26,7 +26,7 @@ export async function PATCH(request, { params }) {
     const b = await request.json();
     const application = params.id;
     core.checkIds({ applicant: b.applicant, application });
-    authenticate({ action: "link", applicant: b.applicant, application, document: `policy-${Number(b.policyId)}`, issued: b.issued, signature: b.signature });
+    await authenticate({ action: "link", applicant: b.applicant, application, document: `policy-${Number(b.policyId)}`, issued: b.issued, signature: b.signature });
     store.link({ applicant: b.applicant, application, policyId: b.policyId });
     return json({ linked: true });
   } catch (e) { return fail(e); }

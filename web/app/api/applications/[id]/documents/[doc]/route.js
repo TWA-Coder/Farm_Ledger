@@ -12,7 +12,7 @@ export async function GET(request, { params }) {
     const q = new URL(request.url).searchParams;
     const applicant = q.get("applicant") || "";
     core.checkIds({ applicant, application: params.id, document: params.doc });
-    authenticateView({ action: "view", applicant, application: params.id, document: params.doc, issued: q.get("issued"), signature: q.get("signature") }, q.get("signer"));
+    await authenticateView({ action: "view", applicant, application: params.id, document: params.doc, issued: q.get("issued"), signature: q.get("signature") }, q.get("signer"));
     const hit = store.get({ applicant, application: params.id, document: params.doc });
     if (!hit) throw new core.DocError(404, "Document not found.");
     const body = fs.readFileSync(hit.path);

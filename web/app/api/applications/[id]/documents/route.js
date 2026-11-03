@@ -18,7 +18,7 @@ export async function POST(request, { params }) {
     const application = params.id;
     const applicant = f("applicant"), document = f("document"), sha256 = f("sha256");
     core.checkIds({ applicant, application, document });
-    authenticate({ action: "upload", applicant, application, document, sha256, filename: file.name, issued: f("issued"), signature: f("signature") });
+    await authenticate({ action: "upload", applicant, application, document, sha256, filename: file.name, issued: f("issued"), signature: f("signature") });
     const buffer = Buffer.from(await file.arrayBuffer());
     core.inspectUpload(buffer, sha256); // size, real content type, and hash must match what was signed
     const meta = store.put({ applicant, application, document, buffer, originalName: file.name });
@@ -32,7 +32,7 @@ export async function DELETE(request, { params }) {
     const b = await request.json();
     const application = params.id;
     core.checkIds({ applicant: b.applicant, application, document: b.document });
-    authenticate({ action: "delete", applicant: b.applicant, application, document: b.document, issued: b.issued, signature: b.signature });
+    await authenticate({ action: "delete", applicant: b.applicant, application, document: b.document, issued: b.issued, signature: b.signature });
     return json({ removed: store.remove({ applicant: b.applicant, application, document: b.document }) });
   } catch (e) { return fail(e); }
 }
@@ -43,7 +43,7 @@ export async function GET(request, { params }) {
     const q = new URL(request.url).searchParams;
     const application = params.id, applicant = q.get("applicant") || "";
     core.checkIds({ applicant, application });
-    authenticate({ action: "list", applicant, application, issued: q.get("issued"), signature: q.get("signature") });
+    await authenticate({ action: "list", applicant, application, issued: q.get("issued"), signature: q.get("signature") });
     return json({ documents: store.list({ applicant, application }).map(({ id, label, document, scope, originalName, mime, size, sha256, uploadedAt }) => ({ id, label, document, scope, originalName, mime, size, sha256, uploadedAt })) });
   } catch (e) { return fail(e); }
 }
