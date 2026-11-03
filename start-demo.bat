@@ -8,6 +8,7 @@ timeout /t 10 /nobreak >nul
 call npm run deploy:local
 call npm run seed
 start "FarmLedger notifier" cmd /k npm run notify
+start "FarmLedger bundler" cmd /k npm run bundler
 start "FarmLedger USSD" cmd /k npm run ussd
 start "FarmLedger web" cmd /k npm run web
 echo.

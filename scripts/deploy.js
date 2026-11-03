@@ -38,6 +38,29 @@ async function main() {
   }
   if (local) await (await ledger.setVetQuorum(2)).wait(); // demo: 2-of-3
 
+  // ERC-4337 smart accounts for farmers (local chain): EntryPoint v0.7, SimpleAccountFactory and a paymaster that
+  // sponsors fees for calls to FarmLedger and the token only. On a public network use the canonical EntryPoint
+  // (0x0000000071727De22E5E9d8BAf0edAc6f37da032) and a hosted bundler instead; set ENTRYPOINT_ADDRESS to reuse one.
+  let aa = null;
+  if (local || process.env.DEPLOY_AA === "true") {
+    const entryPoint = process.env.ENTRYPOINT_ADDRESS
+      ? await ethers.getContractAt("EntryPoint", process.env.ENTRYPOINT_ADDRESS)
+      : await (await ethers.getContractFactory("EntryPoint")).deploy();
+    await entryPoint.waitForDeployment();
+    const factory = await (await ethers.getContractFactory("SimpleAccountFactory")).deploy(await entryPoint.getAddress());
+    await factory.waitForDeployment();
+    const paymaster = await (await ethers.getContractFactory("FarmLedgerPaymaster")).deploy(
+      await entryPoint.getAddress(), [await ledger.getAddress(), await token.getAddress()], ethers.parseEther(process.env.PAYMASTER_MAX_COST_ETH || "0.05"));
+    await paymaster.waitForDeployment();
+    await (await paymaster.deposit({ value: ethers.parseEther(process.env.PAYMASTER_DEPOSIT_ETH || (local ? "100" : "0.05")) })).wait();
+    aa = {
+      entryPoint: await entryPoint.getAddress(),
+      accountFactory: await factory.getAddress(),
+      paymaster: await paymaster.getAddress(),
+      bundlerUrl: process.env.BUNDLER_URL || "http://localhost:4337",
+    };
+  }
+
   const chainId = Number((await ethers.provider.getNetwork()).chainId);
   const info = {
     network: network.name,
@@ -46,6 +69,7 @@ async function main() {
     token: await token.getAddress(),
     ledger: await ledger.getAddress(),
     roles: { admin: deployer.address, underwriter, oracle, vet, claimsAgent },
+    aa,
     deployedAt: new Date().toISOString(),
   };
 
@@ -62,6 +86,7 @@ async function main() {
   console.log("MockRWF   :", info.token);
   console.log("FarmLedger:", info.ledger);
   console.log("Roles     :", info.roles);
+  if (aa) console.log("Smart accounts:", aa);
   console.log(`Saved deployments/${network.name}.json and web/public/{deployment,abi}.json`);
 }
 
