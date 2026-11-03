@@ -86,6 +86,23 @@ export function Dialog({ title, sub, children, actions, onClose }) {
   );
 }
 
+// Result of the last action: in progress, confirmed (with its ledger reference) or failed (with a plain reason).
+export function TxStatus({ status, onClose }) {
+  if (!status) return null;
+  const { label, state, detail, tx, block, warning } = status;
+  const cls = state === "err" ? "callout err" : state === "ok" ? "callout ok" : "callout";
+  return (
+    <div className={cls + " txs"} role={state === "err" ? "alert" : "status"} aria-live="polite">
+      <div style={{ flex: 1 }}>
+        {state === "pending" && <><b>{label}: waiting for confirmation…</b><div className="muted">Please keep this page open. This usually takes a few seconds.</div></>}
+        {state === "ok" && <><b>{label}: done.</b>{tx && <div className="muted">Recorded on the ledger{block ? ` in block ${block}` : ""} · reference <span className="mono" title={tx}>{tx.slice(0, 10)}…{tx.slice(-6)}</span></div>}{warning && <div className="upl-err">{warning}</div>}</>}
+        {state === "err" && <><b>{label} did not go through.</b><div>{detail}</div></>}
+      </div>
+      {state !== "pending" && <button className="btn sec sm" onClick={onClose} aria-label="Dismiss">OK</button>}
+    </div>
+  );
+}
+
 export function Toasts({ items }) {
   return <div id="toasts" aria-live="polite">{items.map((t) => <div key={t.id} className={"ts" + (t.err ? " err" : "")}>{t.msg}</div>)}</div>;
 }
@@ -109,8 +126,8 @@ export function DataTable({ rows, columns, filters, filterFn, onRow, pageSize = 
       const n = q.trim().toLowerCase();
       r = r.filter((x) => columns.some((c) => String(c.text ? c.text(x) : x[c.key] ?? "").toLowerCase().includes(n)));
     }
-    if (sort) {
-      const c = columns.find((x) => x.key === sort.key);
+    const c = sort && columns.find((x) => x.key === sort.key);
+    if (c) { // an unknown sort key is ignored rather than crashing the table
       const val = (x) => (c.sort ? c.sort(x) : x[c.key]);
       r = [...r].sort((a, b) => (val(a) > val(b) ? 1 : val(a) < val(b) ? -1 : 0) * (sort.dir === "asc" ? 1 : -1));
     }

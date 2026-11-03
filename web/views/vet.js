@@ -31,7 +31,7 @@ export function VetOverview({ snap, address, account, go }) {
       </div>
       <div className="two">
         <Box title="How your signature works" sub="No vet can pay a claim alone.">
-          <p>When a farmer reports a death, each certified vet reviews the evidence and signs <b>approve</b> or <b>reject</b>. The contract checks every signature against the certification registry. The claim pays only when <b>{snap.vetQuorum}</b> different certified vets agree.</p>
+          <p>When a farmer reports a death, each certified vet reviews the photo (or examines the animal for phone reports) and signs <b>confirm</b> or <b>reject</b>. The contract checks every signature against the certification registry. The farmer is paid only when <b>{snap.vetQuorum}</b> different certified vets confirm.</p>
           <button className="btn" onClick={() => go("claims")}>Open claims queue{awaiting.length ? ` (${awaiting.length})` : ""}</button>
         </Box>
         <Box title="Recent activity">
@@ -52,14 +52,14 @@ export function VetClaims({ ctx, snap, cfg, address, run, busy }) {
     await run(approved ? "Signed: approve" : "Signed: reject", async () => {
       const deadline = snap.now + 3600;
       const sig = await signAttestation(signer, cfg, { claimId: c.id, policyId: c.policyId, tagId: c.tagId, approved, deadline });
-      await (await ledger.settleLivestockClaim(c.id, approved, deadline, sig)).wait();
+      return (await ledger.settleLivestockClaim(c.id, approved, deadline, sig)).wait();
     });
   };
   const sel = open && snap.claims.find((c) => c.id === open);
   return (
     <>
       <Cert snap={snap} />
-      <Box title="Claims queue" sub="Your decision is an EIP-712 signed message. Anyone can relay it, but only a currently certified vet's signature counts, and each vet counts once.">
+      <Box title="Claims queue" sub="Open a claim to see the photo and the animal's details, then confirm or reject. Your decision is signed with your own key; only certified vets' signatures count, and each vet counts once.">
         <DataTable rows={snap.claims} empty="No claims have been filed." onRow={(c) => setOpen(c.id)} initialSort={{ key: "id", dir: "desc" }}
           filters={[{ value: "me", label: "Awaiting my signature" }, { value: "signed", label: "Signed by me" }, { value: "open", label: "Open" }, { value: "2", label: "Approved" }, { value: "3", label: "Rejected" }]}
           filterFn={(c, f) => (f === "me" ? canSign(snap, c, address) : f === "signed" ? c.iSigned : f === "open" ? c.status === 1 : String(c.status) === f)}
@@ -74,7 +74,7 @@ export function VetClaims({ ctx, snap, cfg, address, run, busy }) {
       </Box>
 
       {sel && (
-        <ClaimDialog snap={snap} claim={sel} onClose={() => setOpen(null)}
+        <ClaimDialog snap={snap} claim={sel} viewer={{ signer, address }} onClose={() => setOpen(null)}
           actions={canSign(snap, sel, address) ? <>
             <button className="btn dng" disabled={busy} onClick={() => setSign({ claim: sel, approved: false })}>Reject</button>
             <button className="btn" disabled={busy} onClick={() => setSign({ claim: sel, approved: true })}>Confirm death &amp; sign</button></> : null} />

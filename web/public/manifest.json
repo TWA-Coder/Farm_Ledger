@@ -2,7 +2,7 @@
   "name": "FarmLedger",
   "short_name": "FarmLedger",
   "description": "Parametric micro-insurance for smallholder farmers",
-  "start_url": "/",
+  "start_url": "/app",
   "display": "standalone",
   "background_color": "#f4f1e8",
   "theme_color": "#1f6f43",

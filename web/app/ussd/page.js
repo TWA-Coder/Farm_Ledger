@@ -57,7 +57,7 @@ export default function UssdChannel() {
     <div className="plain">
       <header className="plainbar">
         <div className="brand" style={{ padding: 0 }}><i>FL</i><div>FarmLedger<small>USSD channel</small></div></div>
-        <a href="/"><Icon name="home" size={15} /> Back to the portal</a>
+        <a href="/app"><Icon name="home" size={15} /> Back to the portal</a>
       </header>
       <main className="content">
         <div className="callout">

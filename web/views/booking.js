@@ -4,14 +4,26 @@ import { ethers } from "ethers";
 import requirements from "../shared/requirements";
 import { Badge, Box, Dialog, KV, Stepper } from "../components/ui";
 import { UploadField } from "../components/upload";
-import { COVER, fmt, fromB32, short } from "../lib/chain";
-import { cond } from "../lib/format";
+import { COVER, errMsg, fmt, fromB32, short } from "../lib/chain";
+import { COVER_PLAIN, cond } from "../lib/format";
 import {
   finalizeApplication, linkApplication, listDocuments, newApplicationId, removeDocument, sha256Hex,
   uploadDocument, validateFile, viewStored, formatBytes,
 } from "../lib/documents";
 
 const MIN_SUM = 1000;
+const DAY = 86400;
+const MAX_START_DAYS = 90; // contract: MAX_START_DELAY
+const MIN_COVER_DAYS = 30; // contract: MIN_COVER_DAYS
+
+// Dates are counted from the chain's "today" (the test tools can move chain time), in the viewer's time zone.
+const isoDate = (ts) => { const d = new Date(Number(ts) * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const dayIndex = (iso) => { const [y, m, d] = iso.split("-").map(Number); return Math.round(Date.UTC(y, m - 1, d) / (DAY * 1000)); };
+const longDate = (ts) => new Date(Number(ts) * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+const UNITS = {
+  rain: "Rain is measured as the total millimetres (mm) of rain that fell on your plot during the previous 30 days, from weather and satellite data.",
+  ndvi: "Crop health is measured with NDVI, a satellite index from 0 (bare soil) to 1 (dense, healthy green crop). Healthy maize is usually above 0.5.",
+};
 const STEPS = ["Cover", "Supporting documents", "Review and submit"];
 
 // Renders the additional questions registered in shared/requirements.js (empty until the policy contract is supplied).
@@ -19,7 +31,7 @@ function ExtraFields({ fields, answers, setAnswers, errors }) {
   if (!fields.length) return null;
   const set = (id, v) => setAnswers((a) => ({ ...a, [id]: v }));
   return (
-    <Box title="Additional information" sub="Declarations and details required for this cover.">
+    <Box title="Your details for the policy schedule" sub="These appear on your policy document. They are kept with your application, not on the public ledger.">
       {fields.map((f) => (
         <div key={f.id}>
           {f.type === "checkbox" ? (
@@ -49,14 +61,17 @@ function ExtraFields({ fields, answers, setAnswers, errors }) {
   );
 }
 
-export function BuyCover({ ctx, snap, address, run, busy, go }) {
+export function BuyCover({ ctx, snap, address, run, busy, go, intent }) {
   const { ledger, token, signer } = ctx;
   const active = snap.products.filter((p) => p.active);
   const [step, setStep] = useState(0);
-  const [pid, setPid] = useState(active[0]?.id || 1);
+  const [pid, setPid] = useState(intent?.pid && active.some((p) => p.id === intent.pid) ? intent.pid : active[0]?.id || 1);
   const [asset, setAsset] = useState("");
   const [sum, setSum] = useState(200000);
   const [quote, setQuote] = useState(null);
+  const [level, setLevel] = useState(0);
+  const [startOffset, setStartOffset] = useState(0); // days after today (0 = as soon as the premium is paid)
+  const [days, setDays] = useState(null);             // cover length; null = product's full length
   const [docs, setDocs] = useState({});            // id -> { file, error, uploaded, stored }
   const [answers, setAnswers] = useState({});
   const [errors, setErrors] = useState({});        // step-level and field-level messages
@@ -80,7 +95,21 @@ export function BuyCover({ ctx, snap, address, run, busy, go }) {
   }, [docDefs]);
 
   useEffect(() => { if (assets.length && !assets.find((a) => a.id === Number(asset))) setAsset(assets[0].id); }, [pid, assets.length]); // eslint-disable-line
-  useEffect(() => { (async () => { try { if (prod && sum > 0) setQuote(await ledger.quotePremium(pid, sum)); } catch { setQuote(null); } })(); }, [pid, sum, prod, ledger]);
+  const maxDays = prod ? Number(prod.durationDays) : 0;
+  const minDays = Math.min(MIN_COVER_DAYS, maxDays);
+  const coverDays = days ?? maxDays;
+  const lvl = prod?.levels?.[level] || prod?.levels?.[0];
+  useEffect(() => { setLevel(0); setDays(null); }, [pid]);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try { if (prod && sum > 0 && coverDays >= 1 && coverDays <= maxDays) { const q = await ledger.quoteCover(pid, level, sum, coverDays); if (live) setQuote(q); } else if (live) setQuote(null); }
+      catch { if (live) setQuote(null); }
+    })();
+    return () => { live = false; };
+  }, [pid, sum, prod, ledger, level, coverDays, maxDays]);
+  const startTs = snap.now + startOffset * DAY;
+  const endTs = startTs + coverDays * DAY;
 
   // Documents on file for this applicant (identity is reused across applications).
   useEffect(() => {
@@ -107,15 +136,38 @@ export function BuyCover({ ctx, snap, address, run, busy, go }) {
     lastKey.current = key;
   }, [pid, asset]);
 
-  if (!snap.farmer.exists) return <Box title="Policy application"><p className="muted">Complete your registration on the Overview page before applying for cover.</p><button className="btn" onClick={() => go("overview")}>Go to registration</button></Box>;
+  if (!snap.farmer.exists) return <Box title="Apply for cover"><p className="muted">Register first. It takes one step: your National ID and phone number.</p><button className="btn" onClick={() => go("overview")}>Register now</button></Box>;
   if (!active.length) return <Box title="Policy application"><p className="empty">No products are available yet.</p></Box>;
 
   if (done) {
+    const retry = () => run("Recording the application", async () => {
+      const rc = await (await ledger.recordApplication(done.policyId, done.hash)).wait();
+      try { await linkApplication(signer, address, done.appId, done.policyId); } catch { /* on-chain record is authoritative */ }
+      setDone({ ...done, recorded: true });
+      return rc;
+    });
     return (
       <Box title="Application submitted">
-        <div className="callout ok"><b>Policy #{done.policyId} is active.</b> Your documents were received and the application is recorded against the policy.</div>
-        <KV rows={[["Policy", `#${done.policyId}`], ["Application reference", appRef(done.appId)], ["Application fingerprint", <span title={done.hash}>{short(done.hash)}</span>], ["Documents", `${done.count} on file`]]} />
-        <div className="row"><button className="btn" onClick={() => go("policies")}>View my policies</button><button className="btn sec" onClick={() => resetAll(true)}>Start another application</button></div>
+        <div className="callout ok"><b>Policy #{done.policyId} is {done.future ? "booked" : "active"}.</b> {done.covered}</div>
+        {!done.recorded && (
+          <div className="callout err" role="alert">
+            <b>Your premium is paid and the policy is active, but your application record was not saved on the ledger.</b>
+            <div>{done.recordError}</div>
+            <button className="btn sm" style={{ marginTop: 8 }} disabled={busy} onClick={retry}>Try again</button>
+          </div>
+        )}
+        <KV rows={[
+          ["Policy", `#${done.policyId}`],
+          ["Premium paid", `${fmt(done.premium)} RWF`],
+          ["Payment reference", <span className="mono" title={done.tx}>{short(done.tx)}</span>],
+          ["Application reference", appRef(done.appId)],
+          ["Documents", `${done.count} on file${done.recorded ? ", fingerprint recorded with the policy" : ""}`],
+        ]} />
+        <h2 style={{ fontSize: 14, margin: "12px 0 4px" }}>What happens next</h2>
+        <p className="muted">{done.isLive
+          ? "If the animal dies during the cover period, open the policy under Policies and claims and choose Report a death. You can also report by phone (USSD)."
+          : "Nothing. FarmLedger checks the weather readings for your plot. If a reading meets the terms, you are paid automatically and you get an SMS."}</p>
+        <div className="row"><button className="btn" onClick={() => go("policies")}>Track my policy</button><button className="btn sec" onClick={() => resetAll(true)}>Apply for more cover</button></div>
       </Box>
     );
   }
@@ -146,6 +198,9 @@ export function BuyCover({ ctx, snap, address, run, busy, go }) {
       if (!asset) e.asset = isLive ? "Register an animal first." : "Register a plot first.";
       if (!Number.isFinite(sum) || sum < MIN_SUM) e.sum = `Enter a sum insured of at least ${fmt(MIN_SUM)} RWF.`;
       if (quote === null) e.sum = e.sum || "The premium could not be calculated for this amount.";
+      else if (snap.balance < quote) e.sum = e.sum || `Your balance (${fmt(snap.balance)} RWF) is lower than the premium (${fmt(quote)} RWF).`;
+      if (!Number.isInteger(startOffset) || startOffset < 0 || startOffset > MAX_START_DAYS) e.start = `Choose a start date from today up to ${MAX_START_DAYS} days ahead.`;
+      if (!Number.isInteger(coverDays) || coverDays < minDays || coverDays > maxDays) e.end = `The cover must last between ${minDays} and ${maxDays} days.`;
     }
     if (s === 1) {
       for (const id of missing) e[id] = docs[id]?.error || "This document is required.";
@@ -190,18 +245,31 @@ export function BuyCover({ ctx, snap, address, run, busy, go }) {
         }
         setProgress("Checking the application");
         const cctx = { cover, productId: Number(pid), assetId: Number(asset), sumInsured: String(sum) };
-        const { applicationHash } = await finalizeApplication(signer, address, appId.current, cctx, answers);
+        // the chosen terms are kept with the application too (the contract records them on the policy)
+        const terms = { triggerLevel: level, startOffsetDays: startOffset, coverDays };
+        const { applicationHash } = await finalizeApplication(signer, address, appId.current, cctx, { ...answers, _terms: terms });
 
         setProgress("Paying the premium and issuing the policy");
-        if (snap.allowance < quote) await (await token.approve(ledger.target, ethers.MaxUint256)).wait();
-        const rc = await (await ledger.buyPolicy(pid, asset, sum)).wait();
+        if (snap.allowance < quote) await (await token.approve(ledger.target, quote)).wait();
+        // startAt 0 = now; a later date starts at the same time of day, counted on chain time
+        const startAt = startOffset === 0 ? 0 : snap.now + startOffset * DAY + 120;
+        const rc = await (await ledger.buyCover(pid, asset, sum, level, startAt, coverDays)).wait();
         const ev = rc.logs.map((l) => { try { return ledger.interface.parseLog(l); } catch { return null; } }).find((x) => x && x.name === "PolicyPurchased");
         const policyId = Number(ev.args.policyId);
+        const base = { policyId, hash: applicationHash, appId: appId.current, count, tx: rc.hash, premium: ev.args.premium, isLive, future: startOffset > 0,
+          covered: `You are covered for ${fmt(ev.args.sumInsured)} RWF from ${longDate(ev.args.start)} to ${longDate(ev.args.end)}.` };
 
+        // The policy now exists and the premium is paid. A failure from here on must not be reported as "nothing happened".
         setProgress("Recording the application");
-        await (await ledger.recordApplication(policyId, applicationHash)).wait();
+        try {
+          await (await ledger.recordApplication(policyId, applicationHash)).wait();
+        } catch (err) {
+          setDone({ ...base, recorded: false, recordError: errMsg(err) });
+          return rc;
+        }
         try { await linkApplication(signer, address, appId.current, policyId); } catch { /* the on-chain record is authoritative; the server link can be repaired */ }
-        setDone({ policyId, hash: applicationHash, appId: appId.current, count });
+        setDone({ ...base, recorded: true });
+        return rc;
       } finally { setProgress(null); }
     });
   }
@@ -223,9 +291,34 @@ export function BuyCover({ ctx, snap, address, run, busy, go }) {
         <Box title="Cover details" sub="Choose the product and what it protects.">
           <label htmlFor="prod">Product</label>
           <select id="prod" value={pid} onChange={(e) => setPid(Number(e.target.value))}>
-            {active.map((p) => <option key={p.id} value={p.id}>{COVER[Number(p.cover)]} · {Number(p.rateBps) / 100}% premium · {Number(p.durationDays)} days</option>)}
+            {active.map((p) => <option key={p.id} value={p.id}>{COVER_PLAIN[Number(p.cover)].name} · up to {Number(p.durationDays)} days</option>)}
           </select>
-          {prod && <p className="muted" style={{ marginTop: 8 }}>Pays when {cond(prod.cover, prod.threshold)}.{isLive && ` A claim needs ${snap.vetQuorum} certified veterinarian signature${snap.vetQuorum > 1 ? "s" : ""}.`}</p>}
+          {prod && !isLive && (
+            <>
+              <label htmlFor="level">When should it pay?</label>
+              <select id="level" value={level} onChange={(e) => setLevel(Number(e.target.value))}>
+                {(prod.levels || []).map((l) => <option key={l.level} value={l.level}>Pays if {cond(prod.cover, l.threshold)} · {Number(l.rateBps) / 100}% for {Number(prod.durationDays)} days</option>)}
+              </select>
+              <p className="muted" style={{ marginTop: 6 }}>{Number(prod.cover) === 2 ? UNITS.ndvi : UNITS.rain} A level that pays more easily costs more.</p>
+            </>
+          )}
+          {prod && isLive && <p className="muted" style={{ marginTop: 8 }}>Pays when {cond(prod.cover, prod.threshold)}. A claim needs {snap.vetQuorum} certified veterinarian signature{snap.vetQuorum > 1 ? "s" : ""}.</p>}
+          <div className="row">
+            <div>
+              <label htmlFor="start">Cover starts</label>
+              <input id="start" type="date" value={isoDate(startTs)} min={isoDate(snap.now)} max={isoDate(snap.now + MAX_START_DAYS * DAY)} aria-invalid={Boolean(errors.start)}
+                onChange={(e) => { if (!e.target.value) return; setStartOffset(dayIndex(e.target.value) - dayIndex(isoDate(snap.now))); }} />
+              <p className="muted">{startOffset === 0 ? "Today, as soon as the premium is paid." : `In ${startOffset} day${startOffset === 1 ? "" : "s"}. Losses before this date are not covered.`}</p>
+              {errors.start && <p className="upl-err" role="alert">{errors.start}</p>}
+            </div>
+            <div>
+              <label htmlFor="end">Cover ends</label>
+              <input id="end" type="date" value={isoDate(endTs)} min={isoDate(startTs + minDays * DAY)} max={isoDate(startTs + maxDays * DAY)} aria-invalid={Boolean(errors.end)}
+                onChange={(e) => { if (!e.target.value) return; setDays(dayIndex(e.target.value) - dayIndex(isoDate(startTs))); }} />
+              <p className="muted">{coverDays} days (between {minDays} and {maxDays}). The premium is for the days you choose.</p>
+              {errors.end && <p className="upl-err" role="alert">{errors.end}</p>}
+            </div>
+          </div>
           <div className="row">
             <div>
               <label htmlFor="asset">{isLive ? "Animal" : "Plot"}</label>
@@ -237,6 +330,7 @@ export function BuyCover({ ctx, snap, address, run, busy, go }) {
             </div>
             <div>
               <label htmlFor="sum">Sum insured (RWF)</label>
+              <p className="muted" style={{ margin: "0 0 4px" }}>The amount paid to you if the cover pays out. {isLive ? "Usually the value of the animal." : "Usually what you invest in the plot (seed, fertiliser, labour)."}</p>
               <input id="sum" type="number" min={MIN_SUM} step="1000" value={sum} onChange={(e) => setSum(Number(e.target.value))} aria-invalid={Boolean(errors.sum)} />
               {errors.sum && <p className="upl-err" role="alert">{errors.sum}</p>}
             </div>
@@ -270,12 +364,13 @@ export function BuyCover({ ctx, snap, address, run, busy, go }) {
         <>
           <Box title="Review your application" sub="Check the details and documents. Use Back to change or replace anything.">
             <KV rows={[
-              ["Product", prod && COVER[cover]],
+              ["Cover", prod && COVER_PLAIN[cover].name],
               [isLive ? "Animal" : "Plot", selected ? (selected.tagId ? fromB32(selected.tagId) : `Plot #${selected.id} · ${fromB32(selected.crop)}`) : "-"],
-              ["Pays when", prod && cond(prod.cover, prod.threshold)],
+              ["Pays when", prod && cond(prod.cover, lvl?.threshold ?? prod.threshold)],
               ["Sum insured", `${fmt(sum)} RWF`],
+              ["Cover period", `${longDate(startTs)} to ${longDate(endTs)}${startOffset === 0 ? " (starts when you pay)" : ""}`],
               ["Premium due now", <b>{fmt(quote)} RWF</b>],
-              ["Duration", prod && `${Number(prod.durationDays)} days`],
+              ["Length", `${coverDays} days`],
             ]} />
           </Box>
           <Box title="Documents" right={<button className="btn sec sm" onClick={() => setStep(1)}>Change documents</button>}>
@@ -307,9 +402,9 @@ export function BuyCover({ ctx, snap, address, run, busy, go }) {
       </div>
 
       {confirm && (
-        <Dialog title="Confirm and pay" sub="The premium is paid into the smart-contract escrow and the policy becomes active immediately." onClose={() => setConfirm(false)}
+        <Dialog title="Confirm and pay" sub={`The premium is taken from your FarmLedger balance and held by the insurance contract. Your cover starts ${startOffset === 0 ? "immediately" : `on ${longDate(startTs)}`}. This test version uses test money.`} onClose={() => setConfirm(false)}
           actions={<><button className="btn sec" onClick={() => setConfirm(false)}>Cancel</button><button className="btn" onClick={submit}>Confirm payment</button></>}>
-          <KV rows={[["Product", prod && COVER[cover]], ["Sum insured", `${fmt(sum)} RWF`], ["Premium", `${fmt(quote)} RWF`], ["Documents", `${docDefs.filter((d) => have(d.id)).length} attached`]]} />
+          <KV rows={[["Cover", prod && COVER_PLAIN[cover].name], ["Sum insured", `${fmt(sum)} RWF`], ["Pays when", prod && cond(prod.cover, lvl?.threshold ?? prod.threshold)], ["Cover period", `${longDate(startTs)} to ${longDate(endTs)}`], ["Premium", `${fmt(quote)} RWF`], ["Documents", `${docDefs.filter((d) => have(d.id)).length} attached`]]} />
         </Dialog>
       )}
     </>
