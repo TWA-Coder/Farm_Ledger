@@ -8,6 +8,7 @@
 // Env: DATA_SOURCE=mock|nasa  RPC_URL  ORACLE_PRIVATE_KEY  NETWORK
 const { connect } = require("./common");
 const { getAdapter } = require("./adapters");
+const readingsLog = require("./readings-log");
 
 const METRIC = { Rainfall: 0, NDVI: 1 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -20,16 +21,17 @@ async function postFor(ctx, plotId, override) {
 
   const rain = await adapter.rainfall(plot, plotId, override);
   const ndvi = await adapter.ndvi(plot, plotId, override);
-  const now = Math.floor(Date.now() / 1000);
-
-  // The chain may be a local node whose clock differs from wall time: never post a timestamp in its future.
+  // Stamp the reading with chain time, not wall time: a local node's clock can run ahead of the wall clock
+  // (fast seeding, fast-forward), and a wall-clock stamp would then predate fresh policies and be ignored.
+  // The latest block's timestamp is never in the future of the block that will include this transaction.
   const block = await ctx.provider.getBlock("latest");
-  const observedAt = Math.min(now, Number(block.timestamp));
+  const observedAt = Number(block.timestamp);
 
   for (const [metric, value, label] of [[METRIC.Rainfall, rain, "rainfall(0.1mm)"], [METRIC.NDVI, ndvi, "ndvi(x1e4)"]]) {
     const t0 = Date.now();
     const tx = await ledger.postReading(plotId, metric, value, observedAt);
     const rc = await tx.wait();
+    readingsLog.append({ tx: rc.hash, plotId: Number(plotId), metric, value, observedAt, source: readingsLog.sourceFor(adapter.name, metric), adapter: adapter.name });
     const paid = rc.logs.filter((l) => l.fragment && l.fragment.name === "PayoutExecuted").length;
     console.log(`[${adapter.name}] plot ${plotId} ${label}=${value}  tx ${rc.hash.slice(0, 10)}…  ${Date.now() - t0} ms` +
       (paid ? `  -> ${paid} PAYOUT(S) EXECUTED` : ""));

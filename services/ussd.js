@@ -17,7 +17,7 @@ const LOCAL_AGENT = "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff
 
 const dep = loadDeployment();
 const local = ["localhost", "hardhat"].includes(dep.network);
-const provider = new ethers.JsonRpcProvider(process.env.RPC_URL || dep.rpcUrl);
+const provider = new ethers.JsonRpcProvider(process.env.RPC_URL || dep.rpcUrl, undefined, { cacheTimeout: -1 }); // no request cache: avoids nonce reuse
 const agentKey = process.env.AGENT_PRIVATE_KEY || (local ? LOCAL_AGENT : null);
 if (!agentKey) throw new Error("Set AGENT_PRIVATE_KEY (the key that holds CLAIMS_AGENT_ROLE).");
 const agent = new ethers.Wallet(agentKey, provider);

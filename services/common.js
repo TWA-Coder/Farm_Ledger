@@ -28,7 +28,11 @@ const HARDHAT_KEYS = {
 function connect(role, keyEnv) {
   const dep = loadDeployment();
   const abi = loadAbi();
-  const provider = new ethers.JsonRpcProvider(process.env.RPC_URL || dep.rpcUrl);
+  // polling: watch events with eth_getLogs instead of eth_newFilter/eth_getFilterChanges, which breaks
+  // ethers' filter subscriber ("results is not iterable") against current Hardhat nodes.
+  // cacheTimeout -1: ethers otherwise caches identical requests for 250 ms, so back-to-back transactions would read
+  // the same nonce ("nonce has already been used").
+  const provider = new ethers.JsonRpcProvider(process.env.RPC_URL || dep.rpcUrl, undefined, { polling: true, pollingInterval: 1000, cacheTimeout: -1 });
   const key = process.env[keyEnv] || HARDHAT_KEYS[role];
   const signer = key ? new ethers.Wallet(key, provider) : null;
   const ledger = new ethers.Contract(dep.ledger, abi.ledger, signer || provider);
