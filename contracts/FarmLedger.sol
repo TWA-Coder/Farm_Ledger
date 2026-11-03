@@ -36,6 +36,9 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     uint16 public constant BPS = 10_000;
     uint64 public constant MAX_WAITING_PERIOD = 30 days;
     uint256 public constant MAX_POLICIES_PER_PLOT = 25;
+    uint64 public constant MAX_START_DELAY = 90 days;   // cover may start up to this far in the future, never in the past
+    uint32 public constant MIN_COVER_DAYS = 30;         // shortest cover a farmer can choose (or the product length if shorter)
+    uint256 public constant MAX_TRIGGER_LEVELS = 5;
 
     // ---------------------------------------------------------------- types
     enum Cover { Drought, Flood, LowNDVI, Livestock }
@@ -88,6 +91,14 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         uint64 start;
         uint64 end;
         PolicyStatus status;
+        uint8 level;         // index into the product's trigger levels chosen at purchase
+        int256 threshold;    // trigger copied from that level, so later product changes never alter this policy
+    }
+
+    /// @dev One selectable trigger for a weather product, with its own price. Level 0 is set by createProduct.
+    struct TriggerLevel {
+        int256 threshold;
+        uint16 rateBps;
     }
 
     struct Claim {
@@ -157,6 +168,7 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     address[] private _vetList;
     mapping(uint256 => mapping(address => bool)) private _attested;
 
+    mapping(uint256 => TriggerLevel[]) private _levels; // productId -> selectable triggers (weather products)
     mapping(uint256 => bytes32) private _applicationHash; // policyId -> hash of the booking application (data + documents)
 
     mapping(address => uint256) public poolBalance;   // underwriter => funds (liquidity + premiums - payouts)
@@ -171,6 +183,8 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     event ProductStatusChanged(uint256 indexed productId, bool active);
     event LiquidityDeposited(address indexed underwriter, uint256 amount);
     event LiquidityWithdrawn(address indexed underwriter, uint256 amount);
+    event TriggerLevelAdded(uint256 indexed productId, uint8 level, int256 threshold, uint16 rateBps);
+    event PolicyTerms(uint256 indexed policyId, uint8 level, int256 threshold, uint32 coverDays);
     event PolicyPurchased(uint256 indexed policyId, address indexed holder, uint256 indexed productId, uint256 assetId, uint256 sumInsured, uint256 premium, uint64 start, uint64 end);
     event ReadingPosted(uint256 indexed plotId, Metric indexed metric, int256 value, uint64 observedAt);
     event ClaimFiled(uint256 indexed claimId, uint256 indexed policyId, address indexed holder, bytes32 tagId, bytes32 evidenceHash);
@@ -211,6 +225,9 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     error AlreadyAttested();
     error InvalidQuorum();
     error ApplicationAlreadyRecorded();
+    error InvalidStart();
+    error InvalidCoverPeriod();
+    error UnknownTriggerLevel();
 
     modifier onlyFarmer() {
         if (!_farmers[msg.sender].exists) revert NotRegistered();
@@ -307,7 +324,22 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
             durationDays: durationDays,
             active: true
         });
+        _levels[productId].push(TriggerLevel({threshold: threshold, rateBps: rateBps}));
         emit ProductCreated(productId, msg.sender, cover, threshold, rateBps, durationDays);
+        emit TriggerLevelAdded(productId, 0, threshold, rateBps);
+    }
+
+    /// @notice Offer another trigger for a weather product (e.g. a stricter drought level at a lower price).
+    function addTriggerLevel(uint256 productId, int256 threshold, uint16 rateBps) external returns (uint8 level) {
+        Product storage p = _products[productId];
+        if (p.underwriter == address(0)) revert InvalidInput();
+        if (p.underwriter != msg.sender) revert NotOwner();
+        if (p.cover == Cover.Livestock) revert WrongAssetType();
+        if (rateBps == 0 || rateBps > BPS) revert InvalidInput();
+        if (_levels[productId].length >= MAX_TRIGGER_LEVELS) revert InvalidInput();
+        level = uint8(_levels[productId].length);
+        _levels[productId].push(TriggerLevel({threshold: threshold, rateBps: rateBps}));
+        emit TriggerLevelAdded(productId, level, threshold, rateBps);
     }
 
     function setProductActive(uint256 productId, bool active) external {
@@ -345,14 +377,57 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         return premium == 0 ? 1 : premium;
     }
 
+    /// @notice Premium for a chosen trigger level and cover length: the level's rate, pro-rated by days.
+    ///         For the full product length and level 0 this equals quotePremium.
+    function quoteCover(uint256 productId, uint8 level, uint256 sumInsured, uint32 coverDays) public view returns (uint256) {
+        Product storage p = _products[productId];
+        if (p.underwriter == address(0)) revert InvalidInput();
+        if (level >= _levels[productId].length) revert UnknownTriggerLevel();
+        if (coverDays == 0 || coverDays > p.durationDays) revert InvalidCoverPeriod();
+        uint256 premium = (sumInsured * _levels[productId][level].rateBps * coverDays) / (uint256(BPS) * p.durationDays);
+        return premium == 0 ? 1 : premium;
+    }
+
+    /// @notice Original purchase: cover starts now, for the product's full length, at the standard trigger (level 0).
     function buyPolicy(
         uint256 productId,
         uint256 assetId,
         uint256 sumInsured
     ) external onlyFarmer whenNotPaused nonReentrant returns (uint256 policyId) {
+        return _buy(productId, assetId, sumInsured, 0, 0, _products[productId].durationDays);
+    }
+
+    /// @notice Purchase with chosen terms.
+    /// @param level     trigger level (see getTriggerLevels); 0 for livestock
+    /// @param startAt   0 = now, otherwise a future time within MAX_START_DELAY (never in the past: no insuring known losses)
+    /// @param coverDays between MIN_COVER_DAYS (or the product length if shorter) and the product length
+    function buyCover(
+        uint256 productId,
+        uint256 assetId,
+        uint256 sumInsured,
+        uint8 level,
+        uint64 startAt,
+        uint32 coverDays
+    ) external onlyFarmer whenNotPaused nonReentrant returns (uint256 policyId) {
+        return _buy(productId, assetId, sumInsured, level, startAt, coverDays);
+    }
+
+    function _buy(
+        uint256 productId,
+        uint256 assetId,
+        uint256 sumInsured,
+        uint8 level,
+        uint64 startAt,
+        uint32 coverDays
+    ) private returns (uint256 policyId) {
         Product storage p = _products[productId];
         if (p.underwriter == address(0) || !p.active) revert ProductInactive();
         if (sumInsured == 0) revert InvalidInput();
+        if (level >= _levels[productId].length) revert UnknownTriggerLevel();
+        uint32 minDays = p.durationDays < MIN_COVER_DAYS ? p.durationDays : MIN_COVER_DAYS;
+        if (coverDays < minDays || coverDays > p.durationDays) revert InvalidCoverPeriod();
+        uint64 start = startAt == 0 ? uint64(block.timestamp) : startAt;
+        if (start < block.timestamp || start > block.timestamp + MAX_START_DELAY) revert InvalidStart();
 
         if (p.cover == Cover.Livestock) {
             Animal storage a = _animals[assetId];
@@ -370,10 +445,10 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         uint256 available = poolBalance[p.underwriter] - poolReserved[p.underwriter];
         if (available < sumInsured) revert InsufficientPool(available, sumInsured);
 
-        uint256 premium = quotePremium(productId, sumInsured);
+        uint256 premium = quoteCover(productId, level, sumInsured, coverDays);
         policyId = ++policyCount;
-        uint64 start = uint64(block.timestamp);
-        uint64 end = start + uint64(p.durationDays) * 1 days;
+        uint64 end = start + uint64(coverDays) * 1 days;
+        int256 threshold = _levels[productId][level].threshold;
 
         _policies[policyId] = Policy({
             holder: msg.sender,
@@ -383,7 +458,9 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
             premium: premium,
             start: start,
             end: end,
-            status: PolicyStatus.Active
+            status: PolicyStatus.Active,
+            level: level,
+            threshold: threshold
         });
         _policiesOf[msg.sender].push(policyId);
         if (p.cover != Cover.Livestock) _activePolicesOfPlot[assetId].push(policyId);
@@ -396,6 +473,7 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
 
         token.safeTransferFrom(msg.sender, address(this), premium);
         emit PolicyPurchased(policyId, msg.sender, productId, assetId, sumInsured, premium, start, end);
+        emit PolicyTerms(policyId, level, threshold, coverDays);
     }
 
     /// @notice Anyone may close a policy that has run its course, releasing the reserved funds.
@@ -441,7 +519,7 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
             if (_metricOf(prod.cover) != metric) continue;
             if (block.timestamp < pol.start || block.timestamp > pol.end) continue;
             if (observedAt < pol.start) continue;
-            if (!_isTriggered(prod.cover, prod.threshold, value)) continue;
+            if (!_isTriggered(prod.cover, pol.threshold, value)) continue;
             _payout(policyId, pol, prod, true);
         }
     }
@@ -616,6 +694,10 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
 
     function getProduct(uint256 id) external view returns (Product memory) {
         return _products[id];
+    }
+
+    function getTriggerLevels(uint256 productId) external view returns (TriggerLevel[] memory) {
+        return _levels[productId];
     }
 
     function getPolicy(uint256 id) external view returns (Policy memory) {

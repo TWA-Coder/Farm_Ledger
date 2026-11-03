@@ -29,6 +29,12 @@ async function main() {
   await (await ledger.connect(underwriter).createProduct(1, 3500, 800, 120)).wait();  // 2 Flood    > 350 mm
   await (await ledger.connect(underwriter).createProduct(2, 3000, 800, 120)).wait();  // 3 Low NDVI < 0.30
   await (await ledger.connect(underwriter).createProduct(3, 0, 500, 365)).wait();     // 4 Livestock mortality
+  // extra trigger levels the farmer can choose (level 0 is the one above)
+  await (await ledger.connect(underwriter).addTriggerLevel(1, 1200, 700)).wait();  // drought, stricter: < 120 mm at 7%
+  await (await ledger.connect(underwriter).addTriggerLevel(1, 1800, 1400)).wait(); // drought, wider:    < 180 mm at 14%
+  await (await ledger.connect(underwriter).addTriggerLevel(2, 4000, 500)).wait();  // flood, stricter:   > 400 mm at 5%
+  await (await ledger.connect(underwriter).addTriggerLevel(2, 3000, 1200)).wait(); // flood, wider:      > 300 mm at 12%
+  await (await ledger.connect(underwriter).addTriggerLevel(3, 4000, 1200)).wait(); // crop health, wider: NDVI < 0.40 at 12%
 
   // Aline - maize in Bugesera (Eastern Province), one dairy cow
   await (await ledger.connect(aline).registerFarmer(h("1199080012345678"), h("250788000001"))).wait();
@@ -43,7 +49,7 @@ async function main() {
   // For the demo the livestock waiting period is shortened to 0 (production default: 7 days).
   await (await ledger.setWaitingPeriod(0)).wait();
 
-  console.log("Seeded: 4 products, 2 farmers (Aline, Jean), 2 plots, 2 cows, 10,000,000 mRWF liquidity.");
+  console.log("Seeded: 4 products (with trigger levels), 2 farmers (Aline, Jean), 2 plots, 2 cows, 10,000,000 mRWF liquidity.");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
