@@ -11,7 +11,7 @@
     "oracle": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     "vet": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
     "claimsAgent": "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720",
-    "government": "0xBcd4042DE499D14e55001CcbB24a551F3b954096"
+    "government": "0xFABB0ac9d68B0B445fB7357272Ff202C5651694a"
   },
   "aa": {
     "entryPoint": "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0",
@@ -19,5 +19,5 @@
     "paymaster": "0x9A676e781A523b5d0C0e43731313A708CB607508",
     "bundlerUrl": "http://localhost:4337"
   },
-  "deployedAt": "2026-11-05T11:35:10.883Z"
+  "deployedAt": "2026-11-05T15:59:03.443Z"
 }

@@ -6,6 +6,9 @@
 //   readings    where each oracle reading came from (real data or sample), keyed by transaction hash
 //   events      index of FarmLedger contract events (see indexer.js), so screens never scan the chain from block 0
 //   meta        indexer cursor and the identity of the chain the indexed data belongs to
+//   phone_accounts  farmers on basic phones: smart account + its owner key, ENCRYPTED (services/phone-accounts.js)
+//   otp_codes       one-time SMS codes (hashed), per phone and purpose
+//   recovery_requests  moving a phone account to a new number (waiting period, cancellable from the old number)
 //
 // Location: $FARMLEDGER_DB, else web/.data/farmledger.db (git-ignored). WAL mode lets the portal and the services
 // read and write the same file at the same time.
@@ -25,6 +28,16 @@ CREATE TABLE IF NOT EXISTS events (
   block INTEGER NOT NULL, log_index INTEGER NOT NULL, tx TEXT NOT NULL, name TEXT NOT NULL, args TEXT NOT NULL,
   PRIMARY KEY (block, log_index));
 CREATE INDEX IF NOT EXISTS events_name ON events (name);
+CREATE TABLE IF NOT EXISTS phone_accounts (
+  phone TEXT PRIMARY KEY, account TEXT NOT NULL UNIQUE, owner TEXT NOT NULL, enc_key TEXT NOT NULL,
+  status TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS otp_codes (
+  phone TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, data TEXT, expires_at INTEGER NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0, sent_at INTEGER NOT NULL, sends INTEGER NOT NULL DEFAULT 1, window_start INTEGER NOT NULL,
+  verified INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (phone, purpose));
+CREATE TABLE IF NOT EXISTS recovery_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, old_phone TEXT NOT NULL, new_phone TEXT NOT NULL, account TEXT NOT NULL,
+  status TEXT NOT NULL, created_at INTEGER NOT NULL, ready_at INTEGER, done_at INTEGER, note TEXT);
 `;
 
 // The web server runs with cwd = web/, the services with cwd = the repository root.

@@ -12,7 +12,7 @@ async function main() {
   const info = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "deployments", "localhost.json")));
   const signers = await ethers.getSigners();
   const [, underwriter, , , aline, jean] = signers;
-  const government = signers[10]; // premium-subsidy programme (deploy.js grants SUBSIDY_ROLE)
+  const government = signers[12]; // premium-subsidy programme (deploy.js grants SUBSIDY_ROLE)
   const reviewer = signers[11];   // the insurer's claims officer (second reviewer for crop loss claims)
   const ledger = await ethers.getContractAt("FarmLedger", info.ledger);
   const token = await ethers.getContractAt("MockRWF", info.token);

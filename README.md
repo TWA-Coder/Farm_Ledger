@@ -95,20 +95,39 @@ before a demo. Anyone who knows the address can reach the service while the tunn
 * The shared test accounts use public development keys that are in the client bundle (local chain only). Real users use a smart account (farmers) or a browser wallet (professionals), see above.
 * Test money (`MockRWF`, open faucet). Mobile Money disbursement is simulated; SMS is logged unless Africa's Talking keys are set.
 * NDVI is always sample data. CHIRPS is not integrated (NASA POWER rainfall is the real-data option). One oracle key is trusted.
-* NAIS contract terms not modelled yet: 40% government premium share, excess, cause-of-death and vaccination rules, multi-animal schedules, yield assessment for crops. The policy document states which of these are not applied.
+* NAIS contract terms not modelled yet (the 40% government premium share is, see *Premium subsidy*): excess, cause-of-death and vaccination rules, multi-animal schedules, yield assessment for crops. The policy document states which of these are not applied.
 
-## USSD (monitoring and claim registration only)
+## USSD (monitoring, claim registration and phone accounts)
 `npm run ussd` starts the USSD service (Africa's Talking callback format) on port 4000; `start-demo.bat` starts it for you.
 Open <http://localhost:3000/ussd> for a handset simulator, or point an Africa's Talking USSD callback at `https://<host>/ussd`.
 
-**Policies are applied for, paid for and issued on the web portal only.** USSD cannot book or activate anything.
+**Policies are applied for, paid for and issued on the web portal only (for now).** USSD cannot book or activate anything yet.
 
-* Menu: **1** My policies (list, then details), **2** Report a claim (cattle death on an active policy, PIN required), **3** Claim status (awaiting vets / approved and paid / rejected).
-* Who: only numbers whose hash was stored when the farmer registered on the web. An unknown number is told to register on the website.
+* Menu: **1** My policies (list, then details), **2** Report a claim (cattle death on an active policy, PIN required), **3** Claim status (awaiting vets / approved and paid / rejected), **4** Reset PIN and, while a number change is waiting, **5** Cancel number change (both only with phone accounts, below).
+* Who: farmers registered on the web, and farmers who registered from their phone (phone accounts). With phone accounts off, an unknown number is told to register on the website.
 * Demo numbers: `250788000001` Aline and `250788000002` Jean (registered by the seed script). First call asks for a 4-digit PIN; 3 wrong PINs lock the number for 30 minutes.
-* **Why it cannot book a policy (enforced, not just hidden):** the service holds one key with `CLAIMS_AGENT_ROLE`, which on-chain can call only `fileClaimFor`. It has no wallets, no gas sponsorship, no Mobile Money collection and no minting. Its write object is built from a one-function interface, and `test/ussd.test.js` scans the source for every state-changing method and fuzzes the menus to prove no policy, asset, claim-other-than-requested or token balance can change.
+* **Why the gateway cannot book a policy (enforced, not just hidden):** the service holds one key with `CLAIMS_AGENT_ROLE`, which on-chain can call only `fileClaimFor`. It has no wallets, no gas sponsorship, no Mobile Money collection and no minting. Its write object is built from a one-function interface, and `test/ussd.test.js` scans the source for every state-changing method and fuzzes the menus to prove no policy, asset, claim-other-than-requested or token balance can change.
 * Vets sign claims on the web portal, not on USSD.
-* Tests: `npm test` includes `test/ussd.test.js`.
+* Tests: `npm test` includes `test/ussd.test.js` and `test/phone-accounts.test.js`.
+
+## Phone accounts (farmers with a basic phone)
+
+A farmer with no smartphone can create a FarmLedger account from USSD. The account is the same kind of ERC-4337 smart account the portal uses, with fees paid by the paymaster, but **the server holds its key** (`services/phone-accounts.js`, the only file that touches farmer keys).
+
+* **Register:** an unregistered number sees *1. Register / 2. I changed my number*. Register asks for the 16-digit National ID (refused if already registered), sends a 6-digit code by SMS, and on the next dial asks for the code, creates the account, registers the farmer on-chain from it (`registerFarmer(keccak(ID), keccak(phone))`) and asks for a PIN. The code proves the number receives SMS, which payout notices rely on. The network already identifies the caller.
+* **Codes:** 6 digits, valid 10 minutes, 5 tries, at most one per minute and five a day per number (enter `0` on the code screen for a new one). Stored as an HMAC, never in plain text.
+* **Key custody:** a new random owner key per phone, encrypted with AES-256-GCM using a key derived from `PHONE_KEY_SECRET`, and bound to the account address. It is decrypted only in memory to sign. On the local chain the secret is generated into `web/.data/phone-key.secret` (git-ignored, owner-only); anywhere else the service refuses to start without `PHONE_KEY_SECRET` (`openssl rand -hex 32`). **This is custodial:** whoever holds the secret and the database can sign for these farmers. Keep the secret apart from database backups.
+* **Reset PIN (menu 4):** needs the National ID on the account. 3 wrong IDs lock the number for 30 minutes. The farmer gets an SMS that the PIN changed. Works for web-registered farmers too.
+* **New SIM / new number (recovery):** from the new number choose *2. I changed my number*, give the old number and the National ID, and confirm the code sent to the new number. The old number is told by SMS and can cancel (menu 5) during the waiting period (`RECOVERY_DELAY_HOURS`, default 48). On the next dial after that, the **same account** (same address, policies and payouts) moves to the new number: `updatePhone()` records the new hash on-chain and the farmer chooses a new PIN. The same answer is given for an unknown number and a wrong ID, and 3 wrong tries lock the number. Farmers registered on the website keep their own key and change their number there.
+* **Operator:** `npm run accounts` lists phone accounts and number changes; `-- cancel <id>` stops one (fraud report); `-- release <id>` ends the waiting period early after checking the farmer's ID in person.
+* **Not yet:** buying cover or paying premiums from USSD (phase 4/6), and logging in to the portal with a phone account.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PHONE_KEY_SECRET` | generated locally | 64 hex chars. Encrypts phone-account keys and code hashes. Required off the local chain |
+| `RECOVERY_DELAY_HOURS` | `48` | How long a number change waits for the old number to cancel |
+| `USSD_SHORTCODE` | "the FarmLedger USSD code" | The code farmers dial, used in SMS texts (e.g. `*384*12345#`) |
+| `PHONE_ACCOUNTS` | on when the smart-account contracts are deployed | `off` = monitoring and claims only |
 
 ## Policy application and supporting documents (web)
 **New application** (farmer) is a three-step wizard: cover details, supporting documents, review and pay.
@@ -156,7 +175,7 @@ Livestock claims are no longer decided by a single role-holder.
 
 Rwanda's National Agricultural Insurance Scheme (NAIS) pays 40% of the premium. FarmLedger models this on-chain:
 
-* `SUBSIDY_ROLE` (deploy: `GOVERNMENT_ADDRESS`, local demo: Hardhat account #10) funds `subsidyPool` (`fundSubsidy` / `withdrawSubsidy`), sets the rate and an optional cap per farmer (`setSubsidy(rateBps, cap)`, at most 90%) and chooses which products qualify (`setSubsidyEligible`).
+* `SUBSIDY_ROLE` (deploy: `GOVERNMENT_ADDRESS`, local demo: Hardhat account #12) funds `subsidyPool` (`fundSubsidy` / `withdrawSubsidy`), sets the rate and an optional cap per farmer (`setSubsidy(rateBps, cap)`, at most 90%) and chooses which products qualify (`setSubsidyEligible`).
 * At purchase the contract takes the subsidy from the pool and only the rest from the farmer. The underwriter always receives the full premium. `PremiumSubsidised(policyId, holder, subsidy, farmerPaid)` records the split; `subsidyFor(farmer, productId, premium)` gives the same number before buying (the portal shows it).
 * The subsidy is cut when the farmer's cap or the pool runs out (never an error), and the farmer always pays at least 1 RWF.
 * Local demo: 40%, 5,000,000 mRWF pool, 200,000 per farmer, all four products.

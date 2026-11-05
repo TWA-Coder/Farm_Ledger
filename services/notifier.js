@@ -13,7 +13,6 @@ const { connect } = require("./common");
 
 const OUT = path.join(__dirname, "out");
 fs.mkdirSync(OUT, { recursive: true });
-const SMS_LOG = path.join(OUT, "sms.log");
 const MOMO_LEDGER = path.join(OUT, "momo-ledger.json");
 
 // Only a hash of the number is on-chain, so the notifier looks the plain number up in the off-chain database
@@ -21,24 +20,7 @@ const MOMO_LEDGER = path.join(OUT, "momo-ledger.json");
 const contacts = require("../web/server/contacts");
 const phoneFor = (phoneHash) => contacts.phoneForHash(phoneHash);
 
-async function sendSms(phone, text) {
-  const line = `${new Date().toISOString()}  SMS -> +${phone}: ${text}`;
-  fs.appendFileSync(SMS_LOG, line + "\n");
-  console.log(line);
-  if (process.env.AT_USERNAME && process.env.AT_API_KEY) {
-    try {
-      const sandbox = process.env.AT_USERNAME === "sandbox";
-      const res = await fetch(`https://api.${sandbox ? "sandbox." : ""}africastalking.com/version1/messaging`, {
-        method: "POST",
-        headers: { apiKey: process.env.AT_API_KEY, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-        body: new URLSearchParams({ username: process.env.AT_USERNAME, to: `+${phone}`, message: text }),
-      });
-      console.log(`  Africa's Talking: HTTP ${res.status}`);
-    } catch (e) {
-      console.error("  Africa's Talking failed (SMS still logged):", e.message);
-    }
-  }
-}
+const { sendSms } = require("./sms");
 
 async function disburseMomo(phone, amount, ref) {
   const ledger = fs.existsSync(MOMO_LEDGER) ? JSON.parse(fs.readFileSync(MOMO_LEDGER, "utf8")) : [];

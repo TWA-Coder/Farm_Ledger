@@ -1,4 +1,5 @@
-// USSD menu engine - MONITORING AND CLAIM REGISTRATION ONLY (Africa's Talking callback format).
+// USSD menu engine (Africa's Talking callback format): monitoring, claim registration and, when phone accounts are
+// enabled, account services for farmers on basic phones.
 //
 // Request  : sessionId, phoneNumber, text   ("text" = every answer so far joined by "*")
 // Response : "CON <screen>"  (session continues)   or   "END <screen>"  (session over)
@@ -7,6 +8,12 @@
 //   1. My policies    - read-only: list the caller's policies and show one in detail.
 //   2. Report a claim - registers a livestock death claim for one of the caller's ACTIVE policies.
 //   3. Claim status   - read-only: progress of the caller's claims (vet signatures, outcome).
+//
+// Account services (only when `accounts` is passed, see services/phone-accounts.js)
+//   * Unregistered number: 1. Register (National ID + SMS code, then a PIN) or 2. I changed my number.
+//   * Registered number:   4. Reset PIN (National ID check), and 5. Cancel number change while a move is pending.
+//   The farmer's own smart account signs these, inside phone-accounts.js. THIS file still holds no key and the
+//   gateway key below still has CLAIMS_AGENT_ROLE only.
 //
 // What it cannot do (by construction, not just by menu design)
 //   * Policies are booked, priced, activated and paid for ONLY on the web portal.
@@ -36,6 +43,8 @@ const STATUS = ["Active", "Claim pending", "Paid out", "Expired"];
 const LOCK_MS = 30 * 60 * 1000;
 const WRITE_SURFACE = ["fileClaimFor"]; // the ONLY state-changing call this service can make
 
+const WELCOME = "Welcome to FarmLedger\n1. Register\n2. I changed my number";
+const NO_MATCH = "No phone account matches that number and ID. If you registered on the website, change your number there.";
 const NOT_REGISTERED = "This number is not registered. Register and buy cover on the FarmLedger website or at an agent. USSD is for checking cover and claims.";
 
 const FRIENDLY = {
@@ -45,10 +54,12 @@ const FRIENDLY = {
   WrongAssetType: "This cover pays automatically. No claim needed.",
   EnforcedPause: "Service is paused. Try later.",
   AccessControlUnauthorizedAccount: "Service is not set up. Try later.",
+  IdAlreadyUsed: "This National ID is already registered.",
+  AlreadyRegistered: "This number is already registered.",
 };
 
 function createUssd(opts) {
-  const { provider, abi, ledgerAddress, agent, db = require("../web/server/db").get() } = opts;
+  const { provider, abi, ledgerAddress, agent, accounts = null, db = require("../web/server/db").get() } = opts;
   if (!agent) throw new Error("agent wallet (CLAIMS_AGENT_ROLE) is required");
 
   const sessions = new Map();
@@ -84,16 +95,43 @@ function createUssd(opts) {
     return { ok: false, locked: tries >= 3 };
   }
 
+  // Wrong National IDs count like wrong PINs (3 -> locked for 30 minutes), so IDs cannot be guessed by redialling.
+  const isLocked = (phone) => { const u = getUser(phone); return Boolean(u.lockedUntil && Date.now() < u.lockedUntil); };
+  function failAttempt(phone) {
+    const tries = (getUser(phone).tries || 0) + 1;
+    putUser(phone, tries >= 3 ? { tries: 0, lockedUntil: Date.now() + LOCK_MS } : { tries });
+    return tries >= 3;
+  }
+
   // ---------------------------------------------------------------- identity: phone -> registered farmer
   const normalize = (p) => String(p || "").replace(/\D/g, "");
-  const phoneIndex = new Map(); // phoneHash -> farmer address
+  // phoneHash -> farmer, built from FarmerRegistered and FarmerPhoneChanged in chain order. A cached answer is
+  // re-checked against the farmer's current phone hash, so a number change is never missed.
+  let phoneIndex = new Map();
+  let idHashes = new Set();
+  const hasEvent = (name) => { try { return Boolean(ledgerRO.interface.getEvent(name)); } catch { return false; } };
+  async function rebuildIndex() {
+    const evs = [...await ledgerRO.queryFilter(ledgerRO.filters.FarmerRegistered(), 0, "latest")];
+    if (hasEvent("FarmerPhoneChanged")) evs.push(...await ledgerRO.queryFilter(ledgerRO.filters.FarmerPhoneChanged(), 0, "latest"));
+    evs.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index);
+    const byPhone = new Map(), phoneOf = new Map(), ids = new Set();
+    for (const e of evs) {
+      const farmer = e.args.farmer;
+      if (phoneOf.has(farmer)) byPhone.delete(phoneOf.get(farmer));
+      byPhone.set(e.args.phoneHash, farmer);
+      phoneOf.set(farmer, e.args.phoneHash);
+      if (e.fragment.name === "FarmerRegistered") ids.add(e.args.idHash);
+    }
+    phoneIndex = byPhone; idHashes = ids;
+  }
   async function farmerByPhone(phone) {
     const h = hashOf(phone);
-    if (phoneIndex.has(h)) return phoneIndex.get(h);
-    const evs = await ledgerRO.queryFilter(ledgerRO.filters.FarmerRegistered(), 0, "latest");
-    for (const e of evs) phoneIndex.set(e.args.phoneHash, e.args.farmer);
+    const hit = phoneIndex.get(h);
+    if (hit && (await ledgerRO.getFarmer(hit)).phoneHash === h) return hit;
+    await rebuildIndex();
     return phoneIndex.get(h) || null;
   }
+  async function idTaken(nid) { await rebuildIndex(); return idHashes.has(hashOf(nid)); }
 
   // ---------------------------------------------------------------- helpers
   async function chainNow() { return Number((await provider.getBlock("latest")).timestamp); }
@@ -201,6 +239,116 @@ function createUssd(opts) {
     return END(lines.join("\n"));
   }
 
+  // ---------------------------------------------------------------- account services (phone accounts)
+  const codeLimit = (r) => (r.reason === "wait" ? `A code was just sent. Wait ${r.waitS} seconds and dial again.` : "Too many codes today. Try again tomorrow.");
+  const when = (ms) => new Date(ms).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const ENTER_CODE = "Enter the 6-digit code from the SMS:\n0. Send a new code";
+  async function resend(env, purpose) {
+    const r = await accounts.resendCode(env.phone, purpose);
+    return END(r.ok ? "We sent a new code by SMS. Dial again within 10 minutes and enter it." : codeLimit(r));
+  }
+  const toIntl = (v) => { const d = normalize(v); return /^07\d{8}$/.test(d) ? "25" + d : d; };
+
+  async function newcomer(env, consumed) {
+    const phone = env.phone;
+    if (isLocked(phone)) return END("Too many wrong tries. Number locked for 30 minutes.");
+    const mv = accounts.moveTo(phone);
+    if (mv) {
+      if (accounts.now() < mv.ready_at) return END(`Your number change is waiting for the safety period. Ready from ${when(mv.ready_at)}.`);
+      await accounts.completeMove(mv.id);
+      consumed();
+      return CON("Your account is now on this number.\nChoose a 4-digit PIN to protect it:");
+    }
+    if (accounts.pendingCode(phone, "move")) return enterMoveCode(env, consumed);
+    if (accounts.pendingCode(phone, "register") || accounts.verifiedCode(phone, "register")) return finishRegistration(env, consumed);
+
+    const c = env.next();
+    if (c === undefined) return CON(WELCOME);
+    if (c === "1") return startRegistration(env);
+    if (c === "2") return startMove(env);
+    return END("Invalid choice.");
+  }
+
+  async function startRegistration(env) {
+    const nid = env.next();
+    if (nid === undefined) return CON("Enter your 16-digit National ID number:");
+    if (!/^\d{16}$/.test(nid)) return END("A National ID has 16 digits. Dial again.");
+    if (await idTaken(nid)) return END("This National ID is already registered. If you changed your number, dial again and choose 2.");
+    const ok = env.next();
+    if (ok === undefined) return CON(`Register ID ending ${nid.slice(-4)} with this number?\n1. Yes\n2. No`);
+    if (ok !== "1") return END("Cancelled.");
+    // only the hash of the ID is kept, and only until the code is used
+    const r = await accounts.sendCode(env.phone, "register", { idHash: hashOf(nid) });
+    if (!r.ok) return END(codeLimit(r));
+    return END("We sent you a 6-digit code by SMS. Dial again within 10 minutes and enter it to finish.");
+  }
+
+  async function finishRegistration(env, consumed) {
+    if (!accounts.verifiedCode(env.phone, "register")) {
+      const code = env.next();
+      if (code === undefined) return CON(ENTER_CODE);
+      if (code === "0") return resend(env, "register");
+      const r = accounts.checkCode(env.phone, "register", code);
+      if (!r.ok) return END(r.left > 0 ? `Wrong code. ${r.left} tries left. Dial again.` : "That code no longer works. Dial again to start over.");
+    }
+    const { data } = accounts.verifiedCode(env.phone, "register");
+    await accounts.register(env.phone, data.idHash);
+    accounts.clearCode(env.phone, "register");
+    consumed();
+    return CON("Registered! Your FarmLedger account is ready.\nChoose a 4-digit PIN to protect it:");
+  }
+
+  async function startMove(env) {
+    const old = env.next();
+    if (old === undefined) return CON("Enter your OLD phone number, e.g. 0788123456:");
+    const oldPhone = toIntl(old);
+    if (!/^2507\d{8}$/.test(oldPhone) || oldPhone === env.phone) return END("That is not a valid old number. Dial again.");
+    const nid = env.next();
+    if (nid === undefined) return CON("Enter your National ID number:");
+    const r = await accounts.startMove(oldPhone, env.phone, nid);
+    if (r.ok) return END("We sent a 6-digit code by SMS to this phone. Dial again within 10 minutes and enter it.");
+    if (r.reason === "no-match") return END(failAttempt(env.phone) ? "Too many wrong tries. Number locked for 30 minutes." : NO_MATCH);
+    if (r.reason === "pending") return END("A number change for this account is already waiting.");
+    if (r.reason === "taken") return END("This number already has an account.");
+    return END(codeLimit(r));
+  }
+
+  async function enterMoveCode(env, consumed) {
+    const code = env.next();
+    if (code === undefined) return CON(ENTER_CODE);
+    if (code === "0") return resend(env, "move");
+    const r = await accounts.confirmMove(env.phone, code);
+    if (!r.ok) return END(r.left > 0 ? `Wrong code. ${r.left} tries left. Dial again.` : "That code no longer works. Dial again to start over.");
+    if (r.request.status === "done") { consumed(); return CON("Your account is now on this number.\nChoose a 4-digit PIN to protect it:"); }
+    return END(`Request saved. For your safety the account moves from ${when(r.request.ready_at)}. We told your old number. Dial again then.`);
+  }
+
+  async function resetPin(env) {
+    if (isLocked(env.phone)) return END("Too many wrong tries. Number locked for 30 minutes.");
+    const nid = env.next();
+    if (nid === undefined) return CON("Enter your National ID number:");
+    if ((await ledgerRO.getFarmer(env.addr)).idHash !== hashOf(nid)) {
+      return END(failAttempt(env.phone) ? "Too many wrong tries. Number locked for 30 minutes." : "That ID does not match this account.");
+    }
+    const p1 = env.next();
+    if (p1 === undefined) return CON("Choose a new 4-digit PIN:");
+    if (!/^\d{4}$/.test(p1)) return END("PIN must be 4 digits.");
+    const p2 = env.next();
+    if (p2 === undefined) return CON("Repeat the new PIN:");
+    if (p1 !== p2) return END("PINs did not match. Dial again.");
+    setPin(env.phone, p1);
+    await accounts.notify(env.phone, "FarmLedger: your USSD PIN was changed. If this was not you, contact FarmLedger support.");
+    return END("PIN changed.");
+  }
+
+  async function cancelMove(env, mv) {
+    const c = env.next();
+    if (c === undefined) return CON("Cancel moving your account to another number?\n1. Yes, cancel it\n2. No");
+    if (c !== "1") return END("Nothing changed.");
+    await accounts.cancelMove(mv.id, "old number");
+    return END("Number change cancelled. Your account stays on this number.");
+  }
+
   // ---------------------------------------------------------------- PIN setup (first call only)
   function pinSetup(env) {
     const p1 = env.next();
@@ -227,25 +375,30 @@ function createUssd(opts) {
   }
 
   const MENU = "FarmLedger\n1. My policies\n2. Report a claim\n3. Claim status";
+  const menuFor = (env) => (accounts
+    ? MENU + "\n4. Reset PIN" + (accounts.moveFrom(env.phone) ? "\n5. Cancel number change" : "")
+    : MENU);
 
   async function route(env, consumed) {
     const addr = await farmerByPhone(env.phone);
-    if (!addr) return END(NOT_REGISTERED);
+    if (!addr) return accounts ? newcomer(env, consumed) : END(NOT_REGISTERED);
     env.addr = addr;
     if (!getUser(env.phone).pinHash) {
       const r = pinSetup(env);
       if (r) return r;
       consumed();
-      return CON("PIN saved.\n" + MENU);
+      return CON("PIN saved.\n" + menuFor(env));
     }
     const choice = env.next();
-    if (choice === undefined) return CON(MENU);
+    if (choice === undefined) return CON(menuFor(env));
     switch (choice) {
       case "1": return myPolicies(env);
       case "2": return reportClaim(env);
       case "3": return claimStatus(env);
-      default: return END("Invalid choice.");
+      case "4": if (accounts) return resetPin(env); break;
+      case "5": { const mv = accounts && accounts.moveFrom(env.phone); if (mv) return cancelMove(env, mv); break; }
     }
+    return END("Invalid choice.");
   }
 
   // ---------------------------------------------------------------- entry point

@@ -4,12 +4,18 @@
 //
 // Env: USSD_PORT (4000)  RPC_URL  AGENT_PRIVATE_KEY (non-local networks)
 //
-// This service is MONITORING + CLAIM REGISTRATION ONLY. Its key holds CLAIMS_AGENT_ROLE and nothing else, so it
-// cannot book or activate a policy, register farmers or assets, or move money. See ussd-core.js.
+// Monitoring and claim registration, plus phone accounts for farmers on basic phones (register, PIN reset, number
+// change) when the smart-account contracts are deployed. The gateway key holds CLAIMS_AGENT_ROLE and nothing else;
+// farmer keys live only in phone-accounts.js (encrypted). See ussd-core.js.
+//
+// Env: PHONE_ACCOUNTS=off disables account services. PHONE_KEY_SECRET (required off the local chain),
+//      RECOVERY_DELAY_HOURS (48), AT_USERNAME / AT_API_KEY for real SMS (codes are otherwise only logged).
 const http = require("http");
 const { ethers } = require("ethers");
 const { loadDeployment, loadAbi } = require("./common");
 const { createUssd } = require("./ussd-core");
+const { createPhoneAccounts, loadSecret } = require("./phone-accounts");
+const { sendSms } = require("./sms");
 
 // Public Hardhat development key (account #9) - LOCAL chain only.
 const LOCAL_AGENT = "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6";
@@ -21,11 +27,16 @@ const agentKey = process.env.AGENT_PRIVATE_KEY || (local ? LOCAL_AGENT : null);
 if (!agentKey) throw new Error("Set AGENT_PRIVATE_KEY (the key that holds CLAIMS_AGENT_ROLE).");
 const agent = new ethers.Wallet(agentKey, provider);
 
+const accounts = dep.aa && process.env.PHONE_ACCOUNTS !== "off"
+  ? createPhoneAccounts({ provider, aa: dep.aa, ledgerAddress: dep.ledger, abi: loadAbi(), secret: loadSecret({ local }), sendSms })
+  : null;
+
 const ussd = createUssd({
   provider,
   abi: loadAbi(),
   ledgerAddress: dep.ledger,
   agent,
+  accounts,
 });
 
 (async () => {
@@ -62,4 +73,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 const port = Number(process.env.USSD_PORT || 4000);
-server.listen(port, () => console.log(`USSD service on http://localhost:${port}/ussd  (registered farmers only: 250788000001 Aline, 250788000002 Jean - monitoring and claims)`));
+server.listen(port, () => {
+  console.log(`USSD service on http://localhost:${port}/ussd  (demo farmers: 250788000001 Aline, 250788000002 Jean)`);
+  console.log(accounts
+    ? `  phone accounts ON: new numbers can register; number changes wait ${accounts.recoveryDelayMs / 3600000} h. SMS codes appear in this log${process.env.AT_API_KEY ? " and are sent by Africa's Talking" : ""}.`
+    : "  phone accounts OFF (no smart-account contracts, or PHONE_ACCOUNTS=off): monitoring and claims only.");
+});

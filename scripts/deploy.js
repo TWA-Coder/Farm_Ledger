@@ -19,7 +19,7 @@ async function main() {
   const claimsAgent = process.env.USSD_AGENT_ADDRESS || (local ? signers[9].address : deployer.address);
   const vet = process.env.VET_ADDRESS || (local ? signers[3].address : deployer.address);
   // The premium-subsidy programme (government, e.g. NAIS): funds the subsidy pool and sets the rate.
-  const government = process.env.GOVERNMENT_ADDRESS || (local ? signers[10].address : deployer.address);
+  const government = process.env.GOVERNMENT_ADDRESS || (local ? signers[12].address : deployer.address); // #10 is the bundler relayer
 
   console.log(`Deploying to ${network.name} as ${deployer.address}`);
   const token = await (await ethers.getContractFactory("MockRWF")).deploy();
