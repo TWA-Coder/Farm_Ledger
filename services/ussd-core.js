@@ -6,8 +6,9 @@
 //
 // What this channel does
 //   1. My policies    - read-only: list the caller's policies and show one in detail.
-//   2. Report a claim - registers a livestock death claim for one of the caller's ACTIVE policies.
-//   3. Claim status   - read-only: progress of the caller's claims (vet signatures, outcome).
+//   2. Report a claim - registers a livestock death claim, or (with CropClaims deployed) a crop loss claim for the
+//                       insurer's reviewers, on one of the caller's ACTIVE policies.
+//   3. Claim status   - read-only: progress of the caller's claims (vet signatures / review, outcome).
 //
 // Account services (only when `accounts` is passed, see services/phone-accounts.js)
 //   * Unregistered number: 1. Register (National ID + SMS code, then a PIN) or 2. I changed my number.
@@ -59,7 +60,7 @@ const FRIENDLY = {
 };
 
 function createUssd(opts) {
-  const { provider, abi, ledgerAddress, agent, accounts = null, db = require("../web/server/db").get() } = opts;
+  const { provider, abi, ledgerAddress, cropClaimsAddress = null, agent, accounts = null, db = require("../web/server/db").get() } = opts;
   if (!agent) throw new Error("agent wallet (CLAIMS_AGENT_ROLE) is required");
 
   const sessions = new Map();
@@ -67,6 +68,9 @@ function createUssd(opts) {
   const ledgerRO = new ethers.Contract(ledgerAddress, abi.ledger, provider);
   // The only write path. A one-function interface: nothing else can be called through this object.
   const claimsAgent = new ethers.Contract(ledgerAddress, ["function fileClaimFor(uint256 policyId, bytes32 evidenceHash) returns (uint256)"], agent);
+  // Crop loss claims (CropClaims.sol): the same single function, on the claims contract, for the same agent role.
+  const cropRO = cropClaimsAddress && abi.cropClaims ? new ethers.Contract(cropClaimsAddress, abi.cropClaims, provider) : null;
+  const cropAgent = cropRO ? new ethers.Contract(cropClaimsAddress, ["function fileClaimFor(uint256 policyId, bytes32 evidenceHash, uint256 requested) returns (uint256)"], agent) : null;
 
   // ---------------------------------------------------------------- storage (PIN state only; db.js table "ussd_users")
   const getUser = (phone) => {
@@ -185,28 +189,42 @@ function createUssd(opts) {
   // ---------------------------------------------------------------- 2. Report a claim (registers a claim only)
   async function reportClaim(env) {
     const all = await policiesOf(env.addr);
-    const cattle = all.filter((p) => p.cover === 3 && p.status === 0);
-    if (!cattle.length) {
-      return END(all.some((p) => p.cover !== 3 && p.status === 0)
+    const active = all.filter((p) => p.status === 0);
+    const claimable = [];
+    for (const p of active) {
+      if (p.cover === 3) claimable.push(p);
+      else if (cropRO && Number(await cropRO.openClaimOf(p.id)) === 0) claimable.push(p);
+    }
+    if (!claimable.length) {
+      if (cropRO && active.some((p) => p.cover !== 3)) return END("Your crop cover already has a loss claim being reviewed. Choose 3 to follow it.");
+      return END(active.some((p) => p.cover !== 3)
         ? "Crop cover pays by itself when weather data triggers it. No claim needed."
         : "You have no active cattle cover to claim on.");
     }
     const labels = [];
-    for (const p of cattle) labels.push(`${await describeAsset(p.policy, p.prod)} (policy #${p.id})`);
+    for (const p of claimable) labels.push(`${await describeAsset(p.policy, p.prod)} (policy #${p.id})`);
     const a = env.next();
-    if (a === undefined) return list("Which animal died?", labels);
-    const i = pickIndex(a, cattle.length); if (i < 0) return END("Invalid choice.");
-    const p = cattle[i];
+    if (a === undefined) return list(cropRO ? "Claim on which cover?" : "Which animal died?", labels);
+    const i = pickIndex(a, claimable.length); if (i < 0) return END("Invalid choice.");
+    const p = claimable[i];
+    const crop = p.cover !== 3;
 
-    const opens = Number(p.policy.start) + Number(await ledgerRO.waitingPeriod());
-    if ((await chainNow()) < opens) return END(`Claims for this policy open on ${date(opens)}.`);
+    if (!crop) {
+      const opens = Number(p.policy.start) + Number(await ledgerRO.waitingPeriod());
+      if ((await chainNow()) < opens) return END(`Claims for this policy open on ${date(opens)}.`);
+    }
 
     const c = env.next();
-    if (c === undefined) return CON(`Report death of ${labels[i]}?\n1. Yes\n2. No`);
+    if (c === undefined) return CON(crop ? `Report a crop loss on ${labels[i]}?\nThe insurer will review it.\n1. Yes\n2. No` : `Report death of ${labels[i]}?\n1. Yes\n2. No`);
     if (c !== "1") return END("Cancelled.");
     const pin = await needPin(env); if (pin) return pin;
 
     const evidence = hashOf(`ussd-report:${env.phone}:${p.id}:${Date.now()}`);
+    if (crop) {
+      const rc = await (await cropAgent.fileClaimFor(p.id, evidence, 0)).wait();
+      const ev = rc.logs.map((l) => { try { return cropRO.interface.parseLog(l); } catch { return null; } }).find((x) => x && x.name === "CropClaimFiled");
+      return END(`Loss claim #${ev.args.claimId} registered. The insurer's reviewers will assess it. Dial again and choose 3 to follow it.`);
+    }
     const rc = await (await claimsAgent.fileClaimFor(p.id, evidence)).wait();
     const ev = rc.logs.map((l) => { try { return ledgerRO.interface.parseLog(l); } catch { return null; } }).find((x) => x && x.name === "ClaimFiled");
     return END(`Claim #${ev.args.claimId} registered. A vet will verify it. Dial again and choose 3 to follow progress.`);
@@ -214,21 +232,37 @@ function createUssd(opts) {
 
   // ---------------------------------------------------------------- 3. Claim status (read-only)
   async function claimStatus(env) {
-    const evs = await ledgerRO.queryFilter(ledgerRO.filters.ClaimFiled(null, null, env.addr), 0, "latest");
-    if (!evs.length) return END("You have no claims.");
     const claims = [];
-    for (const e of [...evs].reverse().slice(0, 5)) {
+    for (const e of await ledgerRO.queryFilter(ledgerRO.filters.ClaimFiled(null, null, env.addr), 0, "latest")) {
       const id = Number(e.args.claimId);
       const c = await ledgerRO.getClaim(id);
-      claims.push({ id, tag: fromB32(e.args.tagId), c, status: Number(c.status), policyId: Number(c.policyId) });
+      claims.push({ kind: "vet", at: e.blockNumber, id, label: fromB32(e.args.tagId), c, status: Number(c.status), policyId: Number(c.policyId) });
     }
-    const word = (x) => (x.status === 1 ? "Awaiting vets" : x.status === 2 ? "Approved" : "Rejected");
+    if (cropRO) {
+      for (const e of await cropRO.queryFilter(cropRO.filters.CropClaimFiled(null, null, env.addr), 0, "latest")) {
+        const id = Number(e.args.claimId);
+        const c = await cropRO.getClaim(id);
+        claims.push({ kind: "crop", at: e.blockNumber, id, label: "crop loss", c, status: Number(c.status), policyId: Number(c.policyId) });
+      }
+    }
+    if (!claims.length) return END("You have no claims.");
+    claims.sort((x, y) => y.at - x.at);
+    const shown = claims.slice(0, 5);
+    const word = (x) => (x.kind === "vet"
+      ? (x.status === 1 ? "Awaiting vets" : x.status === 2 ? "Approved" : "Rejected")
+      : ["", "Being reviewed", "Approved", "Rejected", "Paid automatically"][x.status]);
+    const name = (x) => (x.kind === "vet" ? `#${x.id} ${x.label}` : `Loss #${x.id}`);
     const a = env.next();
-    if (a === undefined) return list("Your claims:", claims.map((x) => `#${x.id} ${x.tag} ${word(x)}`));
-    const i = pickIndex(a, claims.length); if (i < 0) return END("Invalid choice.");
-    const x = claims[i];
-    const lines = [`Claim #${x.id} ${x.tag}`, `Filed ${date(x.c.filedAt)}`];
-    if (x.status === 1) {
+    if (a === undefined) return list("Your claims:", shown.map((x) => `${name(x)} ${word(x)}`));
+    const i = pickIndex(a, shown.length); if (i < 0) return END("Invalid choice.");
+    const x = shown[i];
+    const lines = [x.kind === "vet" ? `Claim #${x.id} ${x.label}` : `Loss claim #${x.id}, policy #${x.policyId}`, `Filed ${date(x.c.filedAt)}`];
+    if (x.kind === "crop") {
+      if (x.status === 1) lines.push("Status: being reviewed", `Approvals: ${Number(x.c.approvals)} of ${Number(x.c.quorum)} needed`);
+      else if (x.status === 2) lines.push("Status: approved", `${fmt(x.c.amount)} RWF paid to you`);
+      else if (x.status === 3) lines.push("Status: rejected", "Your cover continues.");
+      else lines.push("Status: closed", "The policy was paid automatically.");
+    } else if (x.status === 1) {
       lines.push(`Status: awaiting vets`, `Signatures: ${Number(x.c.approvals)} of ${Number(x.c.quorum)} needed`);
     } else if (x.status === 2) {
       const pol = await ledgerRO.getPolicy(x.policyId);

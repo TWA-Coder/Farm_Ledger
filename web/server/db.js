@@ -9,6 +9,7 @@
 //   phone_accounts  farmers on basic phones: smart account + its owner key, ENCRYPTED (services/phone-accounts.js)
 //   otp_codes       one-time SMS codes (hashed), per phone and purpose
 //   recovery_requests  moving a phone account to a new number (waiting period, cancellable from the old number)
+//   sms_outbox  every SMS: queued -> sent -> delivered/undeliverable, with retries and provider ids (services/sms.js)
 //
 // Location: $FARMLEDGER_DB, else web/.data/farmledger.db (git-ignored). WAL mode lets the portal and the services
 // read and write the same file at the same time.
@@ -35,6 +36,12 @@ CREATE TABLE IF NOT EXISTS otp_codes (
   phone TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, data TEXT, expires_at INTEGER NOT NULL,
   tries INTEGER NOT NULL DEFAULT 0, sent_at INTEGER NOT NULL, sends INTEGER NOT NULL DEFAULT 1, window_start INTEGER NOT NULL,
   verified INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (phone, purpose));
+CREATE TABLE IF NOT EXISTS sms_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, dedupe_key TEXT UNIQUE, phone TEXT NOT NULL, text TEXT NOT NULL, kind TEXT NOT NULL,
+  status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, provider_id TEXT, provider_status TEXT,
+  cost TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS sms_outbox_due ON sms_outbox (status, next_at);
+CREATE INDEX IF NOT EXISTS sms_outbox_provider ON sms_outbox (provider_id);
 CREATE TABLE IF NOT EXISTS recovery_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT, old_phone TEXT NOT NULL, new_phone TEXT NOT NULL, account TEXT NOT NULL,
   status TEXT NOT NULL, created_at INTEGER NOT NULL, ready_at INTEGER, done_at INTEGER, note TEXT);

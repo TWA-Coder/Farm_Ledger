@@ -121,7 +121,7 @@ function createPhoneAccounts(opts) {
       ON CONFLICT(phone, purpose) DO UPDATE SET code_hash = excluded.code_hash, data = excluded.data, expires_at = excluded.expires_at,
       tries = 0, sent_at = excluded.sent_at, sends = excluded.sends, window_start = excluded.window_start, verified = 0`)
       .run(phone, purpose, codeHash(phone, purpose, code), JSON.stringify(data ?? null), t + CODE_TTL_MS, t, sends + 1, windowStart);
-    await sendSms(phone, text(code));
+    await sendSms(phone, text(code), { kind: "otp", secret: code }); // the outbox stores the text with the code masked
     return { ok: true, expiresAt: t + CODE_TTL_MS };
   }
 

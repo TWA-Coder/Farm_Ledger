@@ -4,6 +4,9 @@ const path = require("path");
 const { ethers } = require("ethers");
 
 const ROOT = path.join(__dirname, "..");
+// Settings (Africa's Talking keys, CALLBACK_TOKEN, ...) from the git-ignored .env at the repository root.
+// Variables already set in the shell win.
+require("dotenv").config({ path: path.join(ROOT, ".env") });
 
 function loadDeployment() {
   const network = process.env.NETWORK || "localhost";

@@ -10,12 +10,20 @@
 //
 // Env: PHONE_ACCOUNTS=off disables account services. PHONE_KEY_SECRET (required off the local chain),
 //      RECOVERY_DELAY_HOURS (48), AT_USERNAME / AT_API_KEY for real SMS (codes are otherwise only logged).
+//
+// Public access (Africa's Talking through `npm run tunnel`): set CALLBACK_TOKEN and give Africa's Talking the URLs
+//   https://<tunnel>/ussd?key=<CALLBACK_TOKEN>            (USSD callback)
+//   https://<tunnel>/sms/delivery?key=<CALLBACK_TOKEN>    (SMS delivery reports)
+// Requests that arrive through the tunnel (they carry Cloudflare / proxy headers) are refused without the token,
+// because the phone number in a USSD request is only as trustworthy as the caller. Direct local requests (the
+// simulator at http://localhost:3000/ussd) do not need it.
 const http = require("http");
 const { ethers } = require("ethers");
 const { loadDeployment, loadAbi } = require("./common");
 const { createUssd } = require("./ussd-core");
+const { createHandler } = require("./ussd-http");
 const { createPhoneAccounts, loadSecret } = require("./phone-accounts");
-const { sendSms } = require("./sms");
+const { createOutbox } = require("./sms");
 
 // Public Hardhat development key (account #9) - LOCAL chain only.
 const LOCAL_AGENT = "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6";
@@ -27,14 +35,18 @@ const agentKey = process.env.AGENT_PRIVATE_KEY || (local ? LOCAL_AGENT : null);
 if (!agentKey) throw new Error("Set AGENT_PRIVATE_KEY (the key that holds CLAIMS_AGENT_ROLE).");
 const agent = new ethers.Wallet(agentKey, provider);
 
+const outbox = createOutbox({ localChain: local });
+const sendSms = (phone, text, opts) => outbox.sendNow(phone, text, opts);
 const accounts = dep.aa && process.env.PHONE_ACCOUNTS !== "off"
   ? createPhoneAccounts({ provider, aa: dep.aa, ledgerAddress: dep.ledger, abi: loadAbi(), secret: loadSecret({ local }), sendSms })
   : null;
+const TOKEN = process.env.CALLBACK_TOKEN || "";
 
 const ussd = createUssd({
   provider,
   abi: loadAbi(),
   ledgerAddress: dep.ledger,
+  cropClaimsAddress: dep.cropClaims || null,
   agent,
   accounts,
 });
@@ -49,32 +61,17 @@ const ussd = createUssd({
   } catch (e) { console.warn("[ussd] startup check skipped:", e.shortMessage || e.message); }
 })();
 
-const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Allow-Methods": "POST, GET, OPTIONS" };
-
-const server = http.createServer(async (req, res) => {
-  if (req.method === "OPTIONS") { res.writeHead(204, CORS); return res.end(); }
-  if (req.url === "/health") { res.writeHead(200, CORS); return res.end("ok"); }
-  if (req.method === "GET" && (req.url === "/" || req.url === "")) {
-    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", ...CORS });
-    return res.end("FarmLedger USSD service is running.\n\nThis address is for the phone network (POST /ussd), not for browsers.\nTry it in the simulator: http://localhost:3000/ussd\n");
-  }
-  if (req.method !== "POST" || !req.url.startsWith("/ussd")) { res.writeHead(404, CORS); return res.end("not found"); }
-
-  let body = "";
-  for await (const chunk of req) { body += chunk; if (body.length > 10_000) { res.writeHead(413, CORS); return res.end(); } }
-  const ct = req.headers["content-type"] || "";
-  const data = ct.includes("json") ? JSON.parse(body || "{}") : Object.fromEntries(new URLSearchParams(body));
-
-  const t0 = Date.now();
-  const reply = await ussd.handle({ sessionId: data.sessionId || "s", phoneNumber: data.phoneNumber, text: data.text || "" });
-  console.log(`[ussd] ${data.phoneNumber} text="${data.text || ""}" -> ${reply.split("\n")[0]} (${Date.now() - t0} ms)`);
-  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", ...CORS });
-  res.end(reply);
-});
+const server = http.createServer(createHandler({ ussd, outbox, token: TOKEN }));
 
 const port = Number(process.env.USSD_PORT || 4000);
+server.on("error", (e) => {
+  if (e.code !== "EADDRINUSE") throw e;
+  console.error(`Port ${port} is already in use: another USSD service is probably running (find it with: lsof -nP -iTCP:${port} -sTCP:LISTEN). Stop it, or set USSD_PORT.`);
+  process.exit(1);
+});
 server.listen(port, () => {
   console.log(`USSD service on http://localhost:${port}/ussd  (demo farmers: 250788000001 Aline, 250788000002 Jean)`);
+  console.log(`  SMS: ${outbox.mode}${process.env.SMS_ALLOWLIST ? ` (allowlist ${process.env.SMS_ALLOWLIST})` : ""} · internet callbacks: ${TOKEN ? "need ?key=CALLBACK_TOKEN" : "REFUSED (set CALLBACK_TOKEN to accept them)"}`);
   console.log(accounts
     ? `  phone accounts ON: new numbers can register; number changes wait ${accounts.recoveryDelayMs / 3600000} h. SMS codes appear in this log${process.env.AT_API_KEY ? " and are sent by Africa's Talking" : ""}.`
     : "  phone accounts OFF (no smart-account contracts, or PHONE_ACCOUNTS=off): monitoring and claims only.");

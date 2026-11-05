@@ -25,6 +25,9 @@ function reset(db, identity) {
     // and the oracle may already have logged a reading from the new chain before this reset ran.
     db.exec("DELETE FROM events;");
     dbm.setMeta(db, "indexer_identity", identity);
+    // bumped on every rebuild: a redeployed local chain reuses the same addresses, so the identity alone cannot tell
+    // the notifier that its cursor belongs to an old chain
+    dbm.setMeta(db, "indexer_epoch", Number(dbm.getMeta(db, "indexer_epoch") || 0) + 1);
     dbm.setMeta(db, "indexer_block", -1);
     dbm.setMeta(db, "indexer_block_hash", "");
   });
@@ -77,10 +80,12 @@ async function doSync(db, provider, contracts) {
 }
 
 // Events in chain order. `raw` keeps the {"$big"} encoding (for sending as JSON); otherwise BigInts are revived.
-function events(db = dbm.get(), { name = null, raw = false } = {}) {
-  const rows = name
-    ? db.prepare("SELECT * FROM events WHERE name = ? ORDER BY block, log_index").all(name)
-    : db.prepare("SELECT * FROM events ORDER BY block, log_index").all();
+// `after` = {block, idx}: only events after that position (the notifier's cursor).
+function events(db = dbm.get(), { name = null, raw = false, after = null } = {}) {
+  const where = [], params = [];
+  if (name) { where.push("name = ?"); params.push(name); }
+  if (after) { where.push("(block > ? OR (block = ? AND log_index > ?))"); params.push(after.block, after.block, after.idx); }
+  const rows = db.prepare(`SELECT * FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY block, log_index`).all(...params);
   return rows.map((r) => {
     const args = JSON.parse(r.args);
     return { name: r.name, args: raw ? args : reviveArgs(args), block: r.block, idx: r.log_index, tx: r.tx };

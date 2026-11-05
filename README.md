@@ -86,14 +86,15 @@ Older JSON files (`web/.data/contacts.json`, `services/out/ussd-users.json`, `se
 imported once on first start and renamed to `*.imported`.
 
 ### Public URL for the phone network (USSD and SMS callbacks)
-Africa's Talking must reach the USSD service over HTTPS. `npm run tunnel` (needs `brew install cloudflared`) opens a
-free Cloudflare quick tunnel to the USSD service on port 4000 and prints a `https://….trycloudflare.com` address.
-The address changes every time the tunnel starts, so paste the new one into the Africa's Talking callback setting
-before a demo. Anyone who knows the address can reach the service while the tunnel runs; stop it when not in use.
+`npm run tunnel` (needs `brew install cloudflared`) opens a free Cloudflare quick tunnel to the USSD service on port
+4000 and prints the two callback URLs to paste into Africa's Talking (see *Africa's Talking* below). The address
+changes every time the tunnel starts. Requests through the tunnel are refused unless they carry `?key=<CALLBACK_TOKEN>`
+(set in `.env`), because a USSD request's phone number is only as trustworthy as its sender. Stop the tunnel when
+not in use.
 
 ### Known limits of the test version
 * The shared test accounts use public development keys that are in the client bundle (local chain only). Real users use a smart account (farmers) or a browser wallet (professionals), see above.
-* Test money (`MockRWF`, open faucet). Mobile Money disbursement is simulated; SMS is logged unless Africa's Talking keys are set.
+* Test money (`MockRWF`, open faucet). Mobile Money disbursement is simulated; SMS is logged unless Africa's Talking keys are set (see *Africa's Talking*).
 * NDVI is always sample data. CHIRPS is not integrated (NASA POWER rainfall is the real-data option). One oracle key is trusted.
 * NAIS contract terms not modelled yet (the 40% government premium share is, see *Premium subsidy*): excess, cause-of-death and vaccination rules, multi-animal schedules, yield assessment for crops. The policy document states which of these are not applied.
 
@@ -103,12 +104,60 @@ Open <http://localhost:3000/ussd> for a handset simulator, or point an Africa's 
 
 **Policies are applied for, paid for and issued on the web portal only (for now).** USSD cannot book or activate anything yet.
 
-* Menu: **1** My policies (list, then details), **2** Report a claim (cattle death on an active policy, PIN required), **3** Claim status (awaiting vets / approved and paid / rejected), **4** Reset PIN and, while a number change is waiting, **5** Cancel number change (both only with phone accounts, below).
+* Menu: **1** My policies (list, then details), **2** Report a claim (cattle death, or a crop loss for the insurer's reviewers, on an active policy, PIN required), **3** Claim status (awaiting vets / approved and paid / rejected), **4** Reset PIN and, while a number change is waiting, **5** Cancel number change (both only with phone accounts, below).
 * Who: farmers registered on the web, and farmers who registered from their phone (phone accounts). With phone accounts off, an unknown number is told to register on the website.
 * Demo numbers: `250788000001` Aline and `250788000002` Jean (registered by the seed script). First call asks for a 4-digit PIN; 3 wrong PINs lock the number for 30 minutes.
-* **Why the gateway cannot book a policy (enforced, not just hidden):** the service holds one key with `CLAIMS_AGENT_ROLE`, which on-chain can call only `fileClaimFor`. It has no wallets, no gas sponsorship, no Mobile Money collection and no minting. Its write object is built from a one-function interface, and `test/ussd.test.js` scans the source for every state-changing method and fuzzes the menus to prove no policy, asset, claim-other-than-requested or token balance can change.
+* **Why the gateway cannot book a policy (enforced, not just hidden):** the service holds one key with `CLAIMS_AGENT_ROLE`, which on-chain can call only `fileClaimFor` (on FarmLedger for cattle, on CropClaims for crop losses). It has no wallets, no gas sponsorship, no Mobile Money collection and no minting. Its write object is built from a one-function interface, and `test/ussd.test.js` scans the source for every state-changing method and fuzzes the menus to prove no policy, asset, claim-other-than-requested or token balance can change.
 * Vets sign claims on the web portal, not on USSD.
 * Tests: `npm test` includes `test/ussd.test.js` and `test/phone-accounts.test.js`.
+
+## SMS notifications
+
+`npm run notify` texts farmers about every step: welcome, cover bought (with the subsidy split), claim received,
+claim rejected, loss claim received / rejected / superseded, payout (with the reason) and cover ended.
+
+* **In chain order, exactly once.** The notifier reads the event index (`web/server/indexer.js`) and keeps a cursor.
+  Each event's messages go into the SMS outbox (`sms_outbox` table) together with the cursor move, in one database
+  transaction, keyed by transaction and log position. A restart can neither lose nor repeat a message, and a payout
+  can no longer arrive before the purchase.
+* **Outbox** (`services/sms.js`): temporary failures (network, gateway errors, insufficient balance) retry after
+  30 s, 2 min, 10 min, 1 h and 6 h. Later messages to the same phone wait behind a failed one, so order is kept.
+  Permanent failures (invalid number, blacklisted) are recorded with the reason. One-time codes are sent at once,
+  never retried, and stored with the code masked.
+* **Delivery reports** from Africa's Talking (`POST /sms/delivery`) mark messages `delivered` or `undeliverable`.
+* First start skips the existing history (`NOTIFY_HISTORY=all` to text it). After a chain reset it starts from the
+  new chain's first event.
+
+## Africa's Talking (real SMS and USSD)
+
+Everything is built for the Africa's Talking API. What differs between test and live is configuration in `.env`.
+
+**Costs in Rwanda (checked November 2026, confirm with Africa's Talking before paying):**
+* **SMS:** about RWF 6 to 12 per message, depending on volume and network. Sender IDs are free in Rwanda. A few dollars of credit covers testing.
+* **USSD on a real Rwandan phone needs a service code:** an application through the regulator RURA (RWF 25,000) and an Africa's Talking setup fee (about RWF 173,000 per mobile network) plus a monthly fee per network (about RWF 43,300). Sessions cost about RWF 13 each. Timelines: ask info@africastalking.com.
+* **Sandbox:** free. The USSD and SMS simulator at <https://simulator.africastalking.com> uses the same callbacks.
+
+**Steps (sandbox: free, no phone needed):**
+1. Create an account at <https://account.africastalking.com>, open the **Sandbox** app, and generate an API key (Settings > API Key).
+2. In `.env`: `AT_USERNAME=sandbox`, `AT_API_KEY=<key>`. `CALLBACK_TOKEN` is already there.
+3. Start the demo, then `npm run tunnel` and copy the two URLs it prints.
+4. Sandbox > USSD > Create channel (pick any free code), with the printed `/ussd?key=...` URL as the callback. Sandbox > SMS > SMS Callback URLs > Delivery Reports: the printed `/sms/delivery?key=...` URL.
+5. Open the simulator, enter a phone number (for example a new `+2507...` number to try registration), dial your sandbox code. SMS (codes, notices) appear in the simulator's inbox.
+
+**Steps (live SMS to your own phone):**
+1. In your Africa's Talking account, create a live app and top up (SMS > airtime/credit). Generate the live API key.
+2. In `.env`: `AT_USERNAME=<your app username>`, `AT_API_KEY=<live key>` and `SMS_ALLOWLIST=2507XXXXXXXX` (your number). **On the local chain live SMS only goes to allowlisted numbers**: the seeded demo numbers `2507880000xx` may belong to real people.
+3. Set the delivery reports URL as above (live app > SMS > SMS Callback URLs).
+4. Register your own number through the USSD simulator (or save it as a contact on the portal), then buy cover and trigger a payout. The texts arrive on your phone.
+
+| Variable | Purpose |
+|---|---|
+| `AT_USERNAME`, `AT_API_KEY` | `sandbox` + sandbox key, or your live app username + live key. Without them SMS is only logged to `services/out/sms.log` |
+| `AT_SENDER_ID` | Optional registered sender name (live) |
+| `SMS_ALLOWLIST` | Comma-separated numbers. Required for live SMS on the local chain; limits who is texted |
+| `CALLBACK_TOKEN` | Secret in the callback URLs (`openssl rand -hex 16`). Internet requests without it are refused |
+| `USSD_SHORTCODE` | The code farmers dial, used in SMS texts |
+| `NOTIFY_HISTORY`, `NOTIFIER_INTERVAL_MS` | `all` texts past events on first start; poll interval (3000 ms) |
 
 ## Phone accounts (farmers with a basic phone)
 
@@ -120,7 +169,7 @@ A farmer with no smartphone can create a FarmLedger account from USSD. The accou
 * **Reset PIN (menu 4):** needs the National ID on the account. 3 wrong IDs lock the number for 30 minutes. The farmer gets an SMS that the PIN changed. Works for web-registered farmers too.
 * **New SIM / new number (recovery):** from the new number choose *2. I changed my number*, give the old number and the National ID, and confirm the code sent to the new number. The old number is told by SMS and can cancel (menu 5) during the waiting period (`RECOVERY_DELAY_HOURS`, default 48). On the next dial after that, the **same account** (same address, policies and payouts) moves to the new number: `updatePhone()` records the new hash on-chain and the farmer chooses a new PIN. The same answer is given for an unknown number and a wrong ID, and 3 wrong tries lock the number. Farmers registered on the website keep their own key and change their number there.
 * **Operator:** `npm run accounts` lists phone accounts and number changes; `-- cancel <id>` stops one (fraud report); `-- release <id>` ends the waiting period early after checking the farmer's ID in person.
-* **Not yet:** buying cover or paying premiums from USSD (phase 4/6), and logging in to the portal with a phone account.
+* **Not yet:** buying cover or paying premiums from USSD (needs Mobile Money collection, phase 6), and logging in to the portal with a phone account.
 
 | Variable | Default | Purpose |
 |---|---|---|
