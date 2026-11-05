@@ -67,13 +67,29 @@ whole journey from the beginning:
 |---|---|---|
 | `RPC_URL` | `rpcUrl` in `web/public/deployment.json` | Chain the portal API reads (vet certification, phone hash) |
 | `UPLOAD_DIR` | `web/.data/uploads` | Uploaded application and claim documents |
-| `CONTACTS_FILE` | `web/.data/contacts.json` | Plain phone numbers for SMS (off-chain, git-ignored). The notifier reads the same path |
-| `ORACLE_READINGS_LOG` | `services/out/readings.json` | Where the oracle records each reading's data source |
+| `FARMLEDGER_DB` | `web/.data/farmledger.db` | Off-chain SQLite database shared by the portal and the services (see *Off-chain data* below) |
+| `INDEXER_CONFIRMATIONS`, `INDEXER_CHUNK_BLOCKS` | `0`, `2000` | Event index: blocks to wait before indexing (use ~3 on a public network) and blocks per log request |
 | `FARMLEDGER_REVIEWERS` | empty | Comma-separated addresses allowed to view any applicant document (on-chain underwriters can already view them) |
 | `BUNDLER_URL` | `http://localhost:4337` | Written into the deployment at deploy time; where the portal sends farmers' UserOperations |
 | `BUNDLER_PORT`, `BUNDLER_PRIVATE_KEY` | `4337`, Hardhat account #10 | Bundler service port and the key that submits `handleOps` |
 | `PAYMASTER_DEPOSIT_ETH`, `PAYMASTER_MAX_COST_ETH` | `100` (local), `0.05` | Fee sponsorship deposit and the maximum cost of one sponsored operation |
 | `DEPLOY_AA`, `ENTRYPOINT_ADDRESS` | off on testnets | Deploy the smart-account contracts on a public network, reusing an existing EntryPoint |
+
+### Off-chain data
+One SQLite file (`web/.data/farmledger.db`, git-ignored, owner-only permissions) holds what the chain does not:
+plain phone numbers for SMS (`contacts`; the chain stores only their hash), USSD PIN state (`ussd_users`), where
+each oracle reading came from (`readings`), and an index of every contract event (`events`). It uses SQLite built
+into Node 22.5+, so there is nothing to install. The portal reads activity from `/api/events`, which brings the
+index up to date on each request (`web/server/indexer.js`) instead of scanning the chain from block 0. When the local
+chain is restarted, the index notices and rebuilds itself.
+Older JSON files (`web/.data/contacts.json`, `services/out/ussd-users.json`, `services/out/readings.json`) are
+imported once on first start and renamed to `*.imported`.
+
+### Public URL for the phone network (USSD and SMS callbacks)
+Africa's Talking must reach the USSD service over HTTPS. `npm run tunnel` (needs `brew install cloudflared`) opens a
+free Cloudflare quick tunnel to the USSD service on port 4000 and prints a `https://….trycloudflare.com` address.
+The address changes every time the tunnel starts, so paste the new one into the Africa's Talking callback setting
+before a demo. Anyone who knows the address can reach the service while the tunnel runs; stop it when not in use.
 
 ### Known limits of the test version
 * The shared test accounts use public development keys that are in the client bundle (local chain only). Real users use a smart account (farmers) or a browser wallet (professionals), see above.
@@ -135,3 +151,27 @@ Livestock claims are no longer decided by a single role-holder.
 * **Protocol.** Each vet signs an EIP-712 `Attestation(claimId, policyId, tagId, approved, deadline)`. Anyone can relay it. The contract recovers the signer, checks certification, rejects the claimant and duplicate signers (`AlreadyAttested`), and records `ClaimAttested`. When approvals reach the quorum the farmer is paid in that same transaction; when rejections reach it the claim closes and cover continues.
 * **Try it:** log in as the farmer, buy cattle cover, advance time, report a death. Switch to *Dr. Mukamana* and sign (1/2, no payout), then *Dr. Habimana* (2/2, farmer paid). On USSD the same two vets are `250788000009` and `250788000010`.
 * **Access control screen.** Admin → *Access control* reads `hasRole()` / `isCertifiedVet()` live from the chain.
+
+## Premium subsidy (government programme)
+
+Rwanda's National Agricultural Insurance Scheme (NAIS) pays 40% of the premium. FarmLedger models this on-chain:
+
+* `SUBSIDY_ROLE` (deploy: `GOVERNMENT_ADDRESS`, local demo: Hardhat account #10) funds `subsidyPool` (`fundSubsidy` / `withdrawSubsidy`), sets the rate and an optional cap per farmer (`setSubsidy(rateBps, cap)`, at most 90%) and chooses which products qualify (`setSubsidyEligible`).
+* At purchase the contract takes the subsidy from the pool and only the rest from the farmer. The underwriter always receives the full premium. `PremiumSubsidised(policyId, holder, subsidy, farmerPaid)` records the split; `subsidyFor(farmer, productId, premium)` gives the same number before buying (the portal shows it).
+* The subsidy is cut when the farmer's cap or the pool runs out (never an error), and the farmer always pays at least 1 RWF.
+* Local demo: 40%, 5,000,000 mRWF pool, 200,000 per farmer, all four products.
+* The pool is test money (MockRWF). Real NAIS subsidies are paid to insurers off-chain; this is a model of the rule, not an integration with MINAGRI.
+
+## Crop loss claims reviewed by the underwriter (CropClaims.sol)
+
+Index cover pays automatically, but a farmer can lose a crop the index misses (hail, pests, a station far away). `contracts/CropClaims.sol` handles these claims:
+
+* The holder (`fileClaim`) or the USSD gateway (`fileClaimFor`) files during the cover period with an evidence hash and an optional estimate. One open claim per policy, at most 3 per policy.
+* Reviewers are the underwriter account plus the people it adds (`setReviewer`). `setReviewQuorum(M)` sets how many must agree, and is fixed per claim when filed. The claim pays when M reviewers approve **the same amount** (≤ sum insured), and closes when M reject it. Reviewers cannot decide their own claims.
+* Payment goes through `FarmLedger.payAssessedLoss`, callable only by this contract (`ASSESSOR_ROLE`). The payout can be partial; the whole reserve is released.
+* While a claim is open the policy cannot be expired (`UnderAssessment`), but it stays Active. If the index triggers during review, the automatic payout happens and the claim is closed as `Superseded`, so nothing is paid twice.
+* Local demo: 2 of {underwriter, claims officer = Hardhat account #11}. Portal screens for the review queue come in a later phase.
+
+## Phone number change
+
+`updatePhone(newPhoneHash)` lets a registered farmer record a new number (SIM swap, lost phone). The account and its plots, animals and policies are unchanged. The service that calls it must verify the new number with a one-time SMS code first (phone accounts phase).

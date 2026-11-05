@@ -4,18 +4,20 @@
   "rpcUrl": "http://127.0.0.1:8545",
   "token": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
   "ledger": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  "cropClaims": "0x0165878A594ca255338adfa4d48449f69242Eb8F",
   "roles": {
     "admin": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     "underwriter": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     "oracle": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     "vet": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
-    "claimsAgent": "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"
+    "claimsAgent": "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720",
+    "government": "0xBcd4042DE499D14e55001CcbB24a551F3b954096"
   },
   "aa": {
-    "entryPoint": "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318",
-    "accountFactory": "0x610178dA211FEF7D417bC0e6FeD39F05609AD788",
-    "paymaster": "0xB7f8BC63BbcaD18155201308C8f3540b07f84F5e",
+    "entryPoint": "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0",
+    "accountFactory": "0x0DCd1Bf9A1b36cE34237eEaFef220932846BCD82",
+    "paymaster": "0x9A676e781A523b5d0C0e43731313A708CB607508",
     "bundlerUrl": "http://localhost:4337"
   },
-  "deployedAt": "2026-11-03T22:19:02.973Z"
+  "deployedAt": "2026-11-05T11:35:10.883Z"
 }

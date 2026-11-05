@@ -17,7 +17,8 @@
     "bench": "hardhat run benchmark/benchmark.js",
     "slither": "slither . --hardhat-ignore-compile --filter-paths node_modules",
     "web:install": "npm --prefix web install",
-    "web": "npm --prefix web run dev"
+    "web": "npm --prefix web run dev",
+    "tunnel": "cloudflared tunnel --no-autoupdate --url http://localhost:4000"
   },
   "devDependencies": {
     "@account-abstraction/contracts": "0.7.0",

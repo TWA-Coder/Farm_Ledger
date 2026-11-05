@@ -21,8 +21,6 @@
 // registered on the web. Registering a claim also needs a 4-digit PIN (3 wrong tries lock the number for 30
 // minutes). A PIN alone is weak: production needs operator-grade controls (SIM-swap checks, rate limits).
 // Screens are kept under 182 characters (the USSD limit).
-const fs = require("fs");
-const path = require("path");
 const crypto = require("crypto");
 const { ethers } = require("ethers");
 
@@ -50,7 +48,7 @@ const FRIENDLY = {
 };
 
 function createUssd(opts) {
-  const { provider, abi, ledgerAddress, agent, usersFile } = opts;
+  const { provider, abi, ledgerAddress, agent, db = require("../web/server/db").get() } = opts;
   if (!agent) throw new Error("agent wallet (CLAIMS_AGENT_ROLE) is required");
 
   const sessions = new Map();
@@ -59,11 +57,18 @@ function createUssd(opts) {
   // The only write path. A one-function interface: nothing else can be called through this object.
   const claimsAgent = new ethers.Contract(ledgerAddress, ["function fileClaimFor(uint256 policyId, bytes32 evidenceHash) returns (uint256)"], agent);
 
-  // ---------------------------------------------------------------- storage (PIN state only)
-  const readJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return d; } };
-  const writeJson = (f, v) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(v, null, 2)); };
-  const getUser = (phone) => readJson(usersFile, {})[phone] || {};
-  const putUser = (phone, patch) => { const all = readJson(usersFile, {}); all[phone] = { ...(all[phone] || {}), ...patch }; writeJson(usersFile, all); };
+  // ---------------------------------------------------------------- storage (PIN state only; db.js table "ussd_users")
+  const getUser = (phone) => {
+    const r = db.prepare("SELECT * FROM ussd_users WHERE phone = ?").get(phone);
+    return r ? { salt: r.salt, pinHash: r.pin_hash, tries: r.tries, lockedUntil: r.locked_until, pinSetAt: r.pin_set_at } : {};
+  };
+  const putUser = (phone, patch) => {
+    const u = { tries: 0, lockedUntil: 0, ...getUser(phone), ...patch };
+    db.prepare(`INSERT INTO ussd_users (phone, salt, pin_hash, tries, locked_until, pin_set_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(phone) DO UPDATE SET salt = excluded.salt, pin_hash = excluded.pin_hash, tries = excluded.tries,
+      locked_until = excluded.locked_until, pin_set_at = excluded.pin_set_at`)
+      .run(phone, u.salt ?? null, u.pinHash ?? null, u.tries, u.lockedUntil, u.pinSetAt ?? null);
+  };
 
   const hashPin = (pin, salt) => crypto.createHash("sha256").update(salt + ":" + pin).digest("hex");
   function setPin(phone, pin) {

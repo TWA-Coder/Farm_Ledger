@@ -6,10 +6,9 @@
 //   source "sample"     : simulated scenario value (DATA_SOURCE=mock, and NDVI always - no live NDVI feed yet)
 // A reading that is not in this log was posted some other way (e.g. the portal's test tools) and is shown as a test
 // reading.
-const fs = require("fs");
-const path = require("path");
+// Stored in the off-chain database (web/server/db.js, table "readings").
+const dbm = require("../web/server/db");
 
-const DEFAULT_FILE = path.join(__dirname, "out", "readings.json");
 const SOURCES = ["nasa-power", "sample"];
 
 function sourceFor(adapterName, metric) {
@@ -17,22 +16,25 @@ function sourceFor(adapterName, metric) {
   return adapterName === "nasa" && Number(metric) === 0 ? "nasa-power" : "sample";
 }
 
-function read(file = DEFAULT_FILE) {
-  try {
-    const data = JSON.parse(fs.readFileSync(file, "utf8"));
-    return Array.isArray(data) ? data : [];
-  } catch { return []; }
+function read(db = dbm.get()) {
+  return db.prepare("SELECT * FROM readings ORDER BY logged_at, tx").all().map((r) => ({
+    tx: r.tx, plotId: r.plot_id, metric: r.metric, value: r.value, observedAt: r.observed_at, source: r.source, adapter: r.adapter, loggedAt: r.logged_at,
+  }));
 }
 
-function append(entry, file = DEFAULT_FILE) {
+// { [tx lowercased]: "nasa-power" | "sample" }
+function sources(db = dbm.get()) {
+  const out = {};
+  for (const r of db.prepare("SELECT tx, source FROM readings").all()) out[r.tx] = r.source;
+  return out;
+}
+
+function append(entry, db = dbm.get()) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(entry.tx || "")) throw new Error("readings-log: entry needs a transaction hash");
   if (!SOURCES.includes(entry.source)) throw new Error(`readings-log: unknown source ${entry.source}`);
-  const all = read(file);
-  if (all.some((e) => e.tx.toLowerCase() === entry.tx.toLowerCase())) return all; // idempotent
-  all.push({ ...entry, tx: entry.tx.toLowerCase(), loggedAt: new Date().toISOString() });
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(all, null, 2));
-  return all;
+  // INSERT OR IGNORE: the same transaction is recorded once, whatever the letter case of its hash (idempotent)
+  db.prepare("INSERT OR IGNORE INTO readings (tx, plot_id, metric, value, observed_at, source, adapter, logged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(entry.tx.toLowerCase(), entry.plotId ?? null, entry.metric ?? null, entry.value ?? null, entry.observedAt ?? null, entry.source, entry.adapter ?? null, new Date().toISOString());
 }
 
-module.exports = { DEFAULT_FILE, SOURCES, sourceFor, read, append };
+module.exports = { SOURCES, sourceFor, read, sources, append };

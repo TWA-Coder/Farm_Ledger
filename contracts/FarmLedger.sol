@@ -29,6 +29,11 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     // The USSD gateway. It can ONLY register a claim on behalf of a policy holder; it cannot book, price,
     // activate or change a policy, move money, or sign for a vet.
     bytes32 public constant CLAIMS_AGENT_ROLE = keccak256("CLAIMS_AGENT_ROLE");
+    // The government premium-subsidy programme (e.g. Rwanda NAIS, 40%): funds the subsidy pool and sets its rules.
+    bytes32 public constant SUBSIDY_ROLE = keccak256("SUBSIDY_ROLE");
+    // The CropClaims contract: may hold a crop policy open while a loss claim is reviewed, and pay the amount its
+    // reviewers agreed. Granted to that contract only, never to a person.
+    bytes32 public constant ASSESSOR_ROLE = keccak256("ASSESSOR_ROLE");
 
     bytes32 private constant ATTESTATION_TYPEHASH =
         keccak256("Attestation(uint256 claimId,uint256 policyId,bytes32 tagId,bool approved,uint256 deadline)");
@@ -134,6 +139,13 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         uint32 payouts;
     }
 
+    /// @dev Premium subsidy rules. Paid from `subsidyPool` (funded by the programme) to the underwriter together with
+    ///      the farmer's share, so the underwriter always receives the full premium.
+    struct SubsidyConfig {
+        uint16 rateBps;          // share of the premium paid by the programme, e.g. 4000 = 40%
+        uint256 capPerFarmer;    // most one farmer can receive in total; 0 = no cap
+    }
+
     // ---------------------------------------------------------------- storage
     IERC20 public immutable token;
     uint64 public waitingPeriod = 7 days; // livestock claims only after this period (moral-hazard guard)
@@ -175,6 +187,16 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     mapping(address => uint256) public poolReserved;  // underwriter => sum insured of open policies
     mapping(address => Stats) private _stats;
 
+    uint16 public constant MAX_SUBSIDY_BPS = 9000;
+    SubsidyConfig public subsidyConfig;
+    uint256 public subsidyPool;                          // programme funds not yet used
+    uint256 public subsidyPaid;                          // total paid towards premiums
+    mapping(address => uint256) public subsidyUsed;      // farmer => subsidy received so far
+    mapping(uint256 => bool) public subsidyEligible;     // productId => covered by the programme
+    mapping(uint256 => uint256) public subsidyOf;        // policyId => subsidy paid for it
+
+    mapping(uint256 => bool) public underAssessment;     // policyId => a crop loss claim is being reviewed
+
     // ---------------------------------------------------------------- events
     event FarmerRegistered(address indexed farmer, bytes32 idHash, bytes32 phoneHash);
     event PlotRegistered(uint256 indexed plotId, address indexed owner, int32 latE6, int32 lonE6, uint32 areaM2, bytes32 crop, bytes32 geoHash);
@@ -198,6 +220,13 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     event PayoutExecuted(uint256 indexed policyId, address indexed holder, uint256 amount, Cover cover, bool automatic);
     event PolicyExpired(uint256 indexed policyId);
     event WaitingPeriodChanged(uint64 waitingPeriod);
+    event FarmerPhoneChanged(address indexed farmer, bytes32 phoneHash);
+    event SubsidyFunded(address indexed by, uint256 amount);
+    event SubsidyWithdrawn(address indexed by, uint256 amount);
+    event SubsidyConfigured(uint16 rateBps, uint256 capPerFarmer);
+    event SubsidyEligibility(uint256 indexed productId, bool eligible);
+    event PremiumSubsidised(uint256 indexed policyId, address indexed holder, uint256 subsidy, uint256 farmerPaid);
+    event AssessmentHold(uint256 indexed policyId, bool held);
 
     // ---------------------------------------------------------------- errors
     error NotRegistered();
@@ -228,6 +257,7 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     error InvalidStart();
     error InvalidCoverPeriod();
     error UnknownTriggerLevel();
+    error UnderAssessment();
 
     modifier onlyFarmer() {
         if (!_farmers[msg.sender].exists) revert NotRegistered();
@@ -256,6 +286,14 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
             exists: true
         });
         emit FarmerRegistered(msg.sender, idHash, phoneHash);
+    }
+
+    /// @notice A farmer whose SIM / number changed records the new number's hash (the portal or USSD service
+    ///         verifies the new number with a one-time code first). The account and everything it owns stay the same.
+    function updatePhone(bytes32 newPhoneHash) external onlyFarmer whenNotPaused {
+        if (newPhoneHash == bytes32(0)) revert InvalidInput();
+        _farmers[msg.sender].phoneHash = newPhoneHash;
+        emit FarmerPhoneChanged(msg.sender, newPhoneHash);
     }
 
     function registerPlot(
@@ -465,15 +503,24 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         _policiesOf[msg.sender].push(policyId);
         if (p.cover != Cover.Livestock) _activePolicesOfPlot[assetId].push(policyId);
 
+        uint256 subsidy = subsidyFor(msg.sender, productId, premium);
+        if (subsidy > 0) {
+            subsidyPool -= subsidy;
+            subsidyPaid += subsidy;
+            subsidyUsed[msg.sender] += subsidy;
+            subsidyOf[policyId] = subsidy;
+        }
+
         poolReserved[p.underwriter] += sumInsured;
         poolBalance[p.underwriter] += premium;
         Stats storage s = _stats[p.underwriter];
         s.premiums += premium;
         s.policiesSold += 1;
 
-        token.safeTransferFrom(msg.sender, address(this), premium);
+        token.safeTransferFrom(msg.sender, address(this), premium - subsidy);
         emit PolicyPurchased(policyId, msg.sender, productId, assetId, sumInsured, premium, start, end);
         emit PolicyTerms(policyId, level, threshold, coverDays);
+        if (subsidy > 0) emit PremiumSubsidised(policyId, msg.sender, subsidy, premium - subsidy);
     }
 
     /// @notice Anyone may close a policy that has run its course, releasing the reserved funds.
@@ -482,6 +529,7 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         if (pol.holder == address(0)) revert InvalidInput();
         if (pol.status != PolicyStatus.Active) revert PolicyNotActive();
         if (block.timestamp <= pol.end) revert NotYetExpired();
+        if (underAssessment[policyId]) revert UnderAssessment(); // reserve stays until the loss claim is decided
         pol.status = PolicyStatus.Expired;
         _closePolicy(policyId, pol);
         emit PolicyExpired(policyId);
@@ -520,7 +568,7 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
             if (block.timestamp < pol.start || block.timestamp > pol.end) continue;
             if (observedAt < pol.start) continue;
             if (!_isTriggered(prod.cover, pol.threshold, value)) continue;
-            _payout(policyId, pol, prod, true);
+            _payout(policyId, pol, prod, pol.sumInsured, true);
         }
     }
 
@@ -616,12 +664,79 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
             c.status = ClaimStatus.Approved;
             _animals[pol.assetId].deceased = true;
             emit ClaimSettled(claimId, c.policyId, true, signer);
-            _payout(c.policyId, pol, _products[pol.productId], false);
+            _payout(c.policyId, pol, _products[pol.productId], pol.sumInsured, false);
         } else if (c.rejections >= c.quorum) {
             c.status = ClaimStatus.Rejected;
             pol.status = PolicyStatus.Active; // cover continues
             emit ClaimSettled(claimId, c.policyId, false, signer);
         }
+    }
+
+    // =================================================================
+    // Premium subsidy (government programme)
+    // =================================================================
+
+    /// @notice Subsidy a farmer would receive on a premium: the programme rate, limited by the farmer's remaining cap
+    ///         and by the funds left in the pool. 0 if the product is not covered by the programme.
+    function subsidyFor(address farmer, uint256 productId, uint256 premium) public view returns (uint256 subsidy) {
+        SubsidyConfig storage c = subsidyConfig;
+        if (c.rateBps == 0 || !subsidyEligible[productId]) return 0;
+        subsidy = (premium * c.rateBps) / BPS;
+        if (c.capPerFarmer != 0) {
+            uint256 left = c.capPerFarmer > subsidyUsed[farmer] ? c.capPerFarmer - subsidyUsed[farmer] : 0;
+            if (subsidy > left) subsidy = left;
+        }
+        if (subsidy > subsidyPool) subsidy = subsidyPool;
+        if (subsidy >= premium) subsidy = premium - 1; // the farmer always pays something (moral hazard)
+    }
+
+    function fundSubsidy(uint256 amount) external onlyRole(SUBSIDY_ROLE) nonReentrant {
+        if (amount == 0) revert InvalidInput();
+        subsidyPool += amount;
+        token.safeTransferFrom(msg.sender, address(this), amount);
+        emit SubsidyFunded(msg.sender, amount);
+    }
+
+    function withdrawSubsidy(uint256 amount) external onlyRole(SUBSIDY_ROLE) nonReentrant {
+        if (amount == 0 || amount > subsidyPool) revert WithdrawExceedsAvailable(subsidyPool);
+        subsidyPool -= amount;
+        token.safeTransfer(msg.sender, amount);
+        emit SubsidyWithdrawn(msg.sender, amount);
+    }
+
+    function setSubsidy(uint16 rateBps, uint256 capPerFarmer) external onlyRole(SUBSIDY_ROLE) {
+        if (rateBps > MAX_SUBSIDY_BPS) revert InvalidInput();
+        subsidyConfig = SubsidyConfig({rateBps: rateBps, capPerFarmer: capPerFarmer});
+        emit SubsidyConfigured(rateBps, capPerFarmer);
+    }
+
+    function setSubsidyEligible(uint256 productId, bool eligible) external onlyRole(SUBSIDY_ROLE) {
+        if (_products[productId].underwriter == address(0)) revert InvalidInput();
+        subsidyEligible[productId] = eligible;
+        emit SubsidyEligibility(productId, eligible);
+    }
+
+    // =================================================================
+    // Crop loss assessment hooks (called by the CropClaims contract only)
+    // =================================================================
+
+    /// @notice Keeps a crop policy (and its reserve) open while a loss claim is reviewed. The policy stays Active,
+    ///         so an automatic index payout can still happen during the review.
+    function setAssessmentHold(uint256 policyId, bool held) external onlyRole(ASSESSOR_ROLE) {
+        Policy storage pol = _policies[policyId];
+        if (pol.holder == address(0) || _products[pol.productId].cover == Cover.Livestock) revert WrongAssetType();
+        underAssessment[policyId] = held;
+        emit AssessmentHold(policyId, held);
+    }
+
+    /// @notice Pays the loss amount the reviewers agreed (up to the sum insured) and closes the policy.
+    function payAssessedLoss(uint256 policyId, uint256 amount) external onlyRole(ASSESSOR_ROLE) whenNotPaused nonReentrant {
+        Policy storage pol = _policies[policyId];
+        Product storage prod = _products[pol.productId];
+        if (pol.holder == address(0) || prod.cover == Cover.Livestock) revert WrongAssetType();
+        if (pol.status != PolicyStatus.Active) revert PolicyNotActive();
+        if (amount == 0 || amount > pol.sumInsured) revert InvalidInput();
+        _payout(policyId, pol, prod, amount, false);
     }
 
     // =================================================================
@@ -777,11 +892,13 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         return value < threshold; // Drought and LowNDVI
     }
 
-    function _payout(uint256 policyId, Policy storage pol, Product storage prod, bool automatic) private {
+    /// @dev `amount` is the sum insured, except for an assessed crop loss (which may be partial). The full reserve
+    ///      is released either way.
+    function _payout(uint256 policyId, Policy storage pol, Product storage prod, uint256 amount, bool automatic) private {
         pol.status = PolicyStatus.PaidOut;
         address underwriter = prod.underwriter;
-        uint256 amount = pol.sumInsured;
         address holder = pol.holder;
+        if (underAssessment[policyId]) { underAssessment[policyId] = false; emit AssessmentHold(policyId, false); }
 
         _closePolicy(policyId, pol);
         poolBalance[underwriter] -= amount;

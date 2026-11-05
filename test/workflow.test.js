@@ -16,6 +16,7 @@ const req = require("../web/shared/requirements");
 const validation = require("../web/shared/validation");
 const { PLAIN } = require("../web/shared/errors");
 const readingsLog = require("../services/readings-log");
+const dbm = require("../web/server/db");
 const contacts = require("../web/server/contacts");
 
 const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), crypto.randomBytes(512)]);
@@ -158,19 +159,19 @@ describe("Portal support code", function () {
   });
 
   it("oracle readings log records the real source and is idempotent", () => {
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
-    const file = path.join(d, "readings.json");
-    try {
+    const db = dbm.open(":memory:");
+    {
       expect(readingsLog.sourceFor("nasa", Metric.Rainfall)).to.equal("nasa-power");
       expect(readingsLog.sourceFor("nasa", Metric.NDVI)).to.equal("sample"); // no live NDVI feed
       expect(readingsLog.sourceFor("mock", Metric.Rainfall)).to.equal("sample");
       const tx = "0x" + "cd".repeat(32);
-      readingsLog.append({ tx, plotId: 1, metric: 0, value: 700, source: "sample" }, file);
-      readingsLog.append({ tx: tx.toUpperCase().replace("0X", "0x"), plotId: 1, metric: 0, value: 700, source: "sample" }, file);
-      expect(readingsLog.read(file)).to.have.length(1);
-      expect(() => readingsLog.append({ tx, source: "made-up" }, file)).to.throw();
-      expect(() => readingsLog.append({ tx: "0x12", source: "sample" }, file)).to.throw();
-    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+      readingsLog.append({ tx, plotId: 1, metric: 0, value: 700, source: "sample" }, db);
+      readingsLog.append({ tx: tx.toUpperCase().replace("0X", "0x"), plotId: 1, metric: 0, value: 700, source: "sample" }, db);
+      expect(readingsLog.read(db)).to.have.length(1);
+      expect(readingsLog.sources(db)).to.deep.equal({ [tx]: "sample" });
+      expect(() => readingsLog.append({ tx, source: "made-up" }, db)).to.throw();
+      expect(() => readingsLog.append({ tx: "0x12", source: "sample" }, db)).to.throw();
+    }
   });
 
   it("form validation matches the farmer-facing rules", () => {
@@ -185,8 +186,7 @@ describe("Portal support code", function () {
   });
 
   it("SMS contact numbers are accepted only when signed by the farmer and matching the on-chain phone hash", async () => {
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), "ct-"));
-    const file = path.join(d, "contacts.json");
+    const db = dbm.open(":memory:");
     const w = ethers.Wallet.createRandom(), other = ethers.Wallet.createRandom();
     const phone = "250788000003";
     const phoneHashOf = async (a) => (a.toLowerCase() === w.address.toLowerCase() ? hash(phone) : null);
@@ -194,18 +194,20 @@ describe("Portal support code", function () {
       const issued = now();
       return { address, phone: ph, issued, signature: await signer.signMessage(contacts.contactMessage({ address, phone: ph, issued })) };
     };
-    try {
-      await expect(contacts.save(await req(w, "250788999999"), { phoneHashOf, file })).to.be.rejectedWith("does not match");
-      await expect(contacts.save(await req(other), { phoneHashOf, file })).to.be.rejectedWith("Signature does not match");
-      await expect(contacts.save(await req(other, phone, other.address), { phoneHashOf, file })).to.be.rejectedWith("not registered");
-      await expect(contacts.save(await req(w, "0788"), { phoneHashOf, file })).to.be.rejectedWith("Invalid phone");
-      expect(await contacts.save(await req(w), { phoneHashOf, file })).to.deep.equal({ saved: true });
-      expect(contacts.read(file)[w.address.toLowerCase()].phone).to.equal(phone);
-    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+    {
+      await expect(contacts.save(await req(w, "250788999999"), { phoneHashOf, db })).to.be.rejectedWith("does not match");
+      await expect(contacts.save(await req(other), { phoneHashOf, db })).to.be.rejectedWith("Signature does not match");
+      await expect(contacts.save(await req(other, phone, other.address), { phoneHashOf, db })).to.be.rejectedWith("not registered");
+      await expect(contacts.save(await req(w, "0788"), { phoneHashOf, db })).to.be.rejectedWith("Invalid phone");
+      expect(await contacts.save(await req(w), { phoneHashOf, db })).to.deep.equal({ saved: true });
+      expect(contacts.read(db)[w.address.toLowerCase()].phone).to.equal(phone);
+      expect(contacts.phoneForHash(hash(phone), db)).to.equal(phone);
+      expect(contacts.phoneForHash(hash("250788999999"), db)).to.equal(null);
+    }
   });
 
-  it("every FarmLedger contract error has a plain-language message", () => {
-    const src = fs.readFileSync(path.join(__dirname, "..", "contracts", "FarmLedger.sol"), "utf8");
+  it("every FarmLedger and CropClaims contract error has a plain-language message", () => {
+    const src = ["FarmLedger.sol", "CropClaims.sol"].map((f) => fs.readFileSync(path.join(__dirname, "..", "contracts", f), "utf8")).join("\n");
     const names = [...src.matchAll(/^\s*error (\w+)\(/gm)].map((m) => m[1]);
     expect(names.length).to.be.greaterThan(10);
     const missing = names.filter((n) => !PLAIN[n]);

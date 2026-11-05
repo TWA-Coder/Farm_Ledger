@@ -7,9 +7,8 @@
 // This service is MONITORING + CLAIM REGISTRATION ONLY. Its key holds CLAIMS_AGENT_ROLE and nothing else, so it
 // cannot book or activate a policy, register farmers or assets, or move money. See ussd-core.js.
 const http = require("http");
-const path = require("path");
 const { ethers } = require("ethers");
-const { loadDeployment, loadAbi, ROOT } = require("./common");
+const { loadDeployment, loadAbi } = require("./common");
 const { createUssd } = require("./ussd-core");
 
 // Public Hardhat development key (account #9) - LOCAL chain only.
@@ -27,7 +26,6 @@ const ussd = createUssd({
   abi: loadAbi(),
   ledgerAddress: dep.ledger,
   agent,
-  usersFile: path.join(ROOT, "services", "out", "ussd-users.json"),
 });
 
 (async () => {

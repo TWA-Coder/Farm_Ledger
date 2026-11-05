@@ -30,6 +30,16 @@ function ledger() {
   return new ethers.Contract(dep.ledger, abi.ledger, provider);
 }
 
+// Read-only CropClaims contract (crop loss claims reviewed by the underwriter), or null on an older deployment.
+function cropClaims() {
+  const { ethers } = require("ethers");
+  const dep = deployment();
+  if (!dep.cropClaims) return null;
+  const abi = JSON.parse(fs.readFileSync(path.join(PUBLIC_DIR, "abi.json"), "utf8"));
+  const provider = new ethers.JsonRpcProvider(process.env.RPC_URL || dep.rpcUrl, undefined, { staticNetwork: true });
+  return new ethers.Contract(dep.cropClaims, abi.cropClaims, provider);
+}
+
 async function isUnderwriter(address) {
   const l = ledger();
   return Boolean(await l.hasRole(await l.UNDERWRITER_ROLE(), address));
@@ -44,4 +54,4 @@ async function ownerOf(address) {
   try { return await new ethers.Contract(address, ["function owner() view returns (address)"], provider).owner(); } catch { return null; }
 }
 
-module.exports = { deployment, isCertifiedVet, ledger, isUnderwriter, ownerOf };
+module.exports = { deployment, isCertifiedVet, ledger, cropClaims, isUnderwriter, ownerOf };

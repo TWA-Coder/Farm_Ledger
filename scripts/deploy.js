@@ -1,4 +1,4 @@
-// Deploys MockRWF + FarmLedger, grants roles and writes the addresses/ABI the services and web app read.
+// Deploys MockRWF + FarmLedger + CropClaims, grants roles and writes the addresses/ABI the services and web app read.
 //   Local:   npx hardhat node                      (terminal 1)
 //            npm run deploy:local                  (terminal 2)
 //   Testnet: set PRIVATE_KEY (+ optional UNDERWRITER_ADDRESS / ORACLE_ADDRESS / VET_ADDRESS) in .env, then
@@ -18,6 +18,8 @@ async function main() {
   // The USSD gateway key: may ONLY register claims on behalf of holders (CLAIMS_AGENT_ROLE).
   const claimsAgent = process.env.USSD_AGENT_ADDRESS || (local ? signers[9].address : deployer.address);
   const vet = process.env.VET_ADDRESS || (local ? signers[3].address : deployer.address);
+  // The premium-subsidy programme (government, e.g. NAIS): funds the subsidy pool and sets the rate.
+  const government = process.env.GOVERNMENT_ADDRESS || (local ? signers[10].address : deployer.address);
 
   console.log(`Deploying to ${network.name} as ${deployer.address}`);
   const token = await (await ethers.getContractFactory("MockRWF")).deploy();
@@ -28,6 +30,12 @@ async function main() {
   await (await ledger.grantRole(await ledger.UNDERWRITER_ROLE(), underwriter)).wait();
   await (await ledger.grantRole(await ledger.ORACLE_ROLE(), oracle)).wait();
   await (await ledger.grantRole(await ledger.CLAIMS_AGENT_ROLE(), claimsAgent)).wait();
+  await (await ledger.grantRole(await ledger.SUBSIDY_ROLE(), government)).wait();
+
+  // Crop loss claims reviewed by the underwriter's reviewers. Only this contract may pay assessed losses.
+  const cropClaims = await (await ethers.getContractFactory("CropClaims")).deploy(await ledger.getAddress());
+  await cropClaims.waitForDeployment();
+  await (await ledger.grantRole(await ledger.ASSESSOR_ROLE(), await cropClaims.getAddress())).wait();
   // vets are certified (licence hash, sector, expiry), not just granted a role
   const vetExpiry = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
   const vets = local
@@ -50,7 +58,7 @@ async function main() {
     const factory = await (await ethers.getContractFactory("SimpleAccountFactory")).deploy(await entryPoint.getAddress());
     await factory.waitForDeployment();
     const paymaster = await (await ethers.getContractFactory("FarmLedgerPaymaster")).deploy(
-      await entryPoint.getAddress(), [await ledger.getAddress(), await token.getAddress()], ethers.parseEther(process.env.PAYMASTER_MAX_COST_ETH || "0.05"));
+      await entryPoint.getAddress(), [await ledger.getAddress(), await token.getAddress(), await cropClaims.getAddress()], ethers.parseEther(process.env.PAYMASTER_MAX_COST_ETH || "0.05"));
     await paymaster.waitForDeployment();
     await (await paymaster.deposit({ value: ethers.parseEther(process.env.PAYMASTER_DEPOSIT_ETH || (local ? "100" : "0.05")) })).wait();
     aa = {
@@ -68,7 +76,8 @@ async function main() {
     rpcUrl: network.config.url || "http://127.0.0.1:8545",
     token: await token.getAddress(),
     ledger: await ledger.getAddress(),
-    roles: { admin: deployer.address, underwriter, oracle, vet, claimsAgent },
+    cropClaims: await cropClaims.getAddress(),
+    roles: { admin: deployer.address, underwriter, oracle, vet, claimsAgent, government },
     aa,
     deployedAt: new Date().toISOString(),
   };
@@ -78,13 +87,15 @@ async function main() {
 
   const ledgerArt = await artifacts.readArtifact("FarmLedger");
   const tokenArt = await artifacts.readArtifact("MockRWF");
+  const claimsArt = await artifacts.readArtifact("CropClaims");
   const webPublic = path.join(__dirname, "..", "web", "public");
   fs.mkdirSync(webPublic, { recursive: true });
   fs.writeFileSync(path.join(webPublic, "deployment.json"), JSON.stringify(info, null, 2));
-  fs.writeFileSync(path.join(webPublic, "abi.json"), JSON.stringify({ ledger: ledgerArt.abi, token: tokenArt.abi }));
+  fs.writeFileSync(path.join(webPublic, "abi.json"), JSON.stringify({ ledger: ledgerArt.abi, token: tokenArt.abi, cropClaims: claimsArt.abi }));
 
   console.log("MockRWF   :", info.token);
   console.log("FarmLedger:", info.ledger);
+  console.log("CropClaims:", info.cropClaims);
   console.log("Roles     :", info.roles);
   if (aa) console.log("Smart accounts:", aa);
   console.log(`Saved deployments/${network.name}.json and web/public/{deployment,abi}.json`);

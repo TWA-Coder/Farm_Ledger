@@ -16,19 +16,10 @@ fs.mkdirSync(OUT, { recursive: true });
 const SMS_LOG = path.join(OUT, "sms.log");
 const MOMO_LEDGER = path.join(OUT, "momo-ledger.json");
 
-// Demo phone book: only a hash of the number is on-chain, so the notifier needs the plain numbers it is allowed to use.
-const PHONEBOOK_FILE = path.join(__dirname, "phonebook.json");
-function phoneFor(phoneHash) {
-  const book = JSON.parse(fs.readFileSync(PHONEBOOK_FILE, "utf8")).phones.slice();
-  try { // numbers registered through USSD
-    book.push(...Object.keys(JSON.parse(fs.readFileSync(path.join(OUT, "ussd-users.json"), "utf8"))));
-  } catch {}
-  try { // numbers farmers confirmed on the web portal at registration (web/server/contacts.js)
-    const contacts = JSON.parse(fs.readFileSync(process.env.CONTACTS_FILE || path.join(__dirname, "..", "web", ".data", "contacts.json"), "utf8"));
-    book.push(...Object.values(contacts).map((c) => c.phone));
-  } catch {}
-  return book.find((p) => ethers.keccak256(ethers.toUtf8Bytes(p)) === phoneHash) || null;
-}
+// Only a hash of the number is on-chain, so the notifier looks the plain number up in the off-chain database
+// (contacts saved by farmers on the portal, and the seeded demo farmers).
+const contacts = require("../web/server/contacts");
+const phoneFor = (phoneHash) => contacts.phoneForHash(phoneHash);
 
 async function sendSms(phone, text) {
   const line = `${new Date().toISOString()}  SMS -> +${phone}: ${text}`;
@@ -82,7 +73,10 @@ async function main() {
     const day = (ts) => new Date(Number(ts) * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
     const block = await provider.getBlock("latest");
     const when = Number(start) > Number(block.timestamp) + 60 ? `booked, cover starts ${day(start)}` : "active";
-    if (phone) await sendSms(phone, `FarmLedger: policy #${policyId} ${when} until ${day(end)}. Cover ${sumInsured} RWF, premium ${premium} RWF.`);
+    // premium in the event is the full premium; the farmer paid it minus any government subsidy
+    const subsidy = await ledger.subsidyOf(policyId).catch(() => 0n);
+    const paid = subsidy > 0n ? `you paid ${premium - subsidy} RWF (government subsidy ${subsidy} RWF)` : `premium ${premium} RWF`;
+    if (phone) await sendSms(phone, `FarmLedger: policy #${policyId} ${when} until ${day(end)}. Cover ${sumInsured} RWF, ${paid}.`);
   }));
 
   ledger.on("ClaimFiled", once(async (claimId, policyId, holder) => {
@@ -93,7 +87,9 @@ async function main() {
   ledger.on("PayoutExecuted", once(async (policyId, holder, amount, cover, automatic, ev) => {
     const phone = await holderPhone(holder);
     if (!phone) return console.log(`payout for policy ${policyId}: no phone on file for ${holder}`);
-    const why = automatic ? "triggered by satellite/weather data" : "confirmed by certified veterinarians";
+    const why = automatic ? "triggered by satellite/weather data"
+      : Number(cover) === 3 ? "confirmed by certified veterinarians" // livestock
+      : "loss claim approved by the insurer's reviewers"; // crop loss claim (CropClaims)
     await sendSms(phone, `FarmLedger: ${amount} RWF paid for policy #${policyId} (${why}).`);
     await disburseMomo(phone, Number(amount), `policy-${policyId}-${ev.log.transactionHash.slice(0, 10)}`);
   }));

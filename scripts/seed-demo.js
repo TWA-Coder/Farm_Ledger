@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("hardhat");
+const contacts = require("../web/server/contacts");
 
 const b32 = (s) => ethers.encodeBytes32String(s);
 const h = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
@@ -11,6 +12,8 @@ async function main() {
   const info = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "deployments", "localhost.json")));
   const signers = await ethers.getSigners();
   const [, underwriter, , , aline, jean] = signers;
+  const government = signers[10]; // premium-subsidy programme (deploy.js grants SUBSIDY_ROLE)
+  const reviewer = signers[11];   // the insurer's claims officer (second reviewer for crop loss claims)
   const ledger = await ethers.getContractAt("FarmLedger", info.ledger);
   const token = await ethers.getContractAt("MockRWF", info.token);
   const ledgerAddr = info.ledger;
@@ -38,18 +41,35 @@ async function main() {
 
   // Aline - maize in Bugesera (Eastern Province), one dairy cow
   await (await ledger.connect(aline).registerFarmer(h("1199080012345678"), h("250788000001"))).wait();
+  contacts.put(aline.address, "250788000001"); // plain number for SMS, off-chain (the chain has only its hash)
   await (await ledger.connect(aline).registerPlot(-2_150_000, 30_150_000, 5000, b32("MAIZE"), h("geojson-aline-plot-1"))).wait();
   await (await ledger.connect(aline).registerAnimal(b32("RW-TAG-0001"), b32("FRIESIAN"), 2021, h("photo-cow-1"))).wait();
 
   // Jean - beans in Nyagatare, one dairy cow
   await (await ledger.connect(jean).registerFarmer(h("1198570087654321"), h("250788000002"))).wait();
+  contacts.put(jean.address, "250788000002");
   await (await ledger.connect(jean).registerPlot(-1_300_000, 30_300_000, 8000, b32("BEANS"), h("geojson-jean-plot-1"))).wait();
   await (await ledger.connect(jean).registerAnimal(b32("RW-TAG-0002"), b32("CROSSBREED"), 2020, h("photo-cow-2"))).wait();
+
+  // Government premium subsidy (Rwanda NAIS pays 40% of the premium), all four products, at most 200,000 per farmer.
+  await (await token.mint(government.address, 5_000_000)).wait();
+  await (await token.connect(government).approve(ledgerAddr, ethers.MaxUint256)).wait();
+  await (await ledger.connect(government).fundSubsidy(5_000_000)).wait();
+  await (await ledger.connect(government).setSubsidy(4000, 200_000)).wait();
+  for (const id of [1, 2, 3, 4]) await (await ledger.connect(government).setSubsidyEligible(id, true)).wait();
+
+  // Crop loss claims: decided by 2 of {underwriter, claims officer}.
+  if (info.cropClaims) {
+    const claims = await ethers.getContractAt("CropClaims", info.cropClaims);
+    await (await claims.connect(underwriter).setReviewer(reviewer.address, true)).wait();
+    await (await claims.connect(underwriter).setReviewQuorum(2)).wait();
+  }
 
   // For the demo the livestock waiting period is shortened to 0 (production default: 7 days).
   await (await ledger.setWaitingPeriod(0)).wait();
 
-  console.log("Seeded: 4 products (with trigger levels), 2 farmers (Aline, Jean), 2 plots, 2 cows, 10,000,000 mRWF liquidity.");
+  console.log("Seeded: 4 products (with trigger levels), 2 farmers (Aline, Jean), 2 plots, 2 cows, 10,000,000 mRWF liquidity,");
+  console.log("        40% premium subsidy (5,000,000 mRWF pool, 200,000 cap per farmer), crop claim reviewers 2-of-2.");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

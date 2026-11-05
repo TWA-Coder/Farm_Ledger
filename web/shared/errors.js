@@ -1,4 +1,4 @@
-// Contract errors in plain words. Keys are the custom error names in contracts/FarmLedger.sol.
+// Contract errors in plain words. Keys are the custom error names in contracts/FarmLedger.sol and CropClaims.sol.
 // CommonJS so the tests can check that every contract error has a message.
 const PLAIN = {
   NotRegistered: "You need to register as a farmer first.",
@@ -24,7 +24,7 @@ const PLAIN = {
   NotYetExpired: "This policy has not ended yet.",
   TooManyPolicies: "This plot already has the maximum number of policies.",
   WithdrawExceedsAvailable: "You cannot withdraw funds that are reserved for active policies.",
-  InvalidQuorum: "The number of vet signatures must be between 1 and 5.",
+  InvalidQuorum: "The number of approvals needed must be between 1 and 5, and no more than the people who can give them.",
   ECDSAInvalidSignature: "The signature is not valid. Please sign again.",
   SafeERC20FailedOperation: "The payment could not be completed. Check your balance and try again.",
   InvalidStart: "The start date must be today or a date within the next 90 days.",
@@ -35,6 +35,17 @@ const PLAIN = {
   ERC20InsufficientBalance: "Your balance is too low to pay this premium.",
   ERC20InsufficientAllowance: "Payment was not authorised. Please try again.",
   AccessControlUnauthorizedAccount: "This account is not allowed to do that.",
+  UnderAssessment: "A loss claim on this policy is still being reviewed, so it cannot be closed yet.",
+  // CropClaims.sol
+  NotUnderwriter: "Only an insurer account can manage claim reviewers.",
+  NotReviewer: "You are not a claim reviewer for this insurer.",
+  ReviewerIsHolder: "You cannot review your own claim.",
+  AlreadyReviewed: "You have already given your decision on this claim.",
+  ClaimAlreadyOpen: "A loss claim on this policy is already being reviewed.",
+  TooManyClaims: "The maximum number of loss claims for this policy has been reached.",
+  WrongCover: "Livestock claims are checked by vets. Report the animal's death from the livestock claim screen.",
+  AmountMismatch: "Another reviewer already approved a different amount. Approve the same amount, or reject the claim.",
+  Paused: "The platform is paused by the administrator. Try again later.",
 };
 
 module.exports = { PLAIN };

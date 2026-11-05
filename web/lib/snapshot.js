@@ -1,6 +1,7 @@
 "use client";
 import { ethers } from "ethers";
 import { DEMO_ACCOUNTS, fromB32 } from "./chain";
+import { reviveArgs } from "../shared/event-json";
 
 export function pick(r) { // ethers Result -> plain object (named fields only)
   const o = {};
@@ -26,10 +27,11 @@ export async function loadSnapshot({ ctx, provider, cfg, address, account }) {
   const animals = await Promise.all(animalIds.map(async (id) => ({ id: Number(id), ...pick(await ledger.getAnimal(id)) })));
   const policies = await Promise.all(policyIds.map(async (id) => ({ id: Number(id), ...pick(await ledger.getPolicy(id)), appHash: await ledger.applicationHashOf(id) })));
 
-  const logs = await provider.getLogs({ address: cfg.dep.ledger, fromBlock: 0, toBlock: "latest" });
-  const events = logs.map((l) => {
-    try { const p = ledger.interface.parseLog(l); return { name: p.name, args: p.args, block: l.blockNumber, idx: l.index, tx: l.transactionHash }; } catch { return null; }
-  }).filter(Boolean);
+  // Contract events come from the portal's event index (/api/events), not from a scan of the chain since block 0.
+  const res = await fetch("/api/events", { cache: "no-store" });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || "The portal server could not load the activity history.");
+  const events = body.events.map((e) => ({ ...e, args: reviveArgs(e.args) }));
 
   // every livestock claim, with its signature trail
   const claims = [];

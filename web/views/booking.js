@@ -68,7 +68,8 @@ export function BuyCover({ ctx, snap, address, run, busy, go, intent }) {
   const [pid, setPid] = useState(intent?.pid && active.some((p) => p.id === intent.pid) ? intent.pid : active[0]?.id || 1);
   const [asset, setAsset] = useState("");
   const [sum, setSum] = useState(200000);
-  const [quote, setQuote] = useState(null);
+  const [quote, setQuote] = useState(null);     // what the farmer pays: premium minus the government subsidy
+  const [subsidy, setSubsidy] = useState(0n);  // paid by the subsidy programme (0 when none applies)
   const [level, setLevel] = useState(0);
   const [startOffset, setStartOffset] = useState(0); // days after today (0 = as soon as the premium is paid)
   const [days, setDays] = useState(null);             // cover length; null = product's full length
@@ -103,11 +104,17 @@ export function BuyCover({ ctx, snap, address, run, busy, go, intent }) {
   useEffect(() => {
     let live = true;
     (async () => {
-      try { if (prod && sum > 0 && coverDays >= 1 && coverDays <= maxDays) { const q = await ledger.quoteCover(pid, level, sum, coverDays); if (live) setQuote(q); } else if (live) setQuote(null); }
-      catch { if (live) setQuote(null); }
+      try {
+        if (prod && sum > 0 && coverDays >= 1 && coverDays <= maxDays) {
+          const q = await ledger.quoteCover(pid, level, sum, coverDays);
+          const s = await ledger.subsidyFor(address, pid, q).catch(() => 0n); // older deployment: no subsidy
+          if (live) { setQuote(q - s); setSubsidy(s); }
+        } else if (live) { setQuote(null); setSubsidy(0n); }
+      }
+      catch { if (live) { setQuote(null); setSubsidy(0n); } }
     })();
     return () => { live = false; };
-  }, [pid, sum, prod, ledger, level, coverDays, maxDays]);
+  }, [pid, sum, prod, ledger, level, coverDays, maxDays, address]);
   const startTs = snap.now + startOffset * DAY;
   const endTs = startTs + coverDays * DAY;
 
@@ -159,6 +166,7 @@ export function BuyCover({ ctx, snap, address, run, busy, go, intent }) {
         <KV rows={[
           ["Policy", `#${done.policyId}`],
           ["Premium paid", `${fmt(done.premium)} RWF`],
+          ...(done.subsidy > 0n ? [["Government subsidy", `${fmt(done.subsidy)} RWF paid by the subsidy programme`]] : []),
           ["Payment reference", <span className="mono" title={done.tx}>{short(done.tx)}</span>],
           ["Application reference", appRef(done.appId)],
           ["Documents", `${done.count} on file${done.recorded ? ", fingerprint recorded with the policy" : ""}`],
@@ -256,7 +264,8 @@ export function BuyCover({ ctx, snap, address, run, busy, go, intent }) {
         const rc = await (await ledger.buyCover(pid, asset, sum, level, startAt, coverDays)).wait();
         const ev = rc.logs.map((l) => { try { return ledger.interface.parseLog(l); } catch { return null; } }).find((x) => x && x.name === "PolicyPurchased");
         const policyId = Number(ev.args.policyId);
-        const base = { policyId, hash: applicationHash, appId: appId.current, count, tx: rc.hash, premium: ev.args.premium, isLive, future: startOffset > 0,
+        const sub = rc.logs.map((l) => { try { return ledger.interface.parseLog(l); } catch { return null; } }).find((x) => x && x.name === "PremiumSubsidised");
+        const base = { policyId, hash: applicationHash, appId: appId.current, count, tx: rc.hash, premium: sub ? sub.args.farmerPaid : ev.args.premium, subsidy: sub ? sub.args.subsidy : 0n, isLive, future: startOffset > 0,
           covered: `You are covered for ${fmt(ev.args.sumInsured)} RWF from ${longDate(ev.args.start)} to ${longDate(ev.args.end)}.` };
 
         // The policy now exists and the premium is paid. A failure from here on must not be reported as "nothing happened".
@@ -336,8 +345,9 @@ export function BuyCover({ ctx, snap, address, run, busy, go, intent }) {
             </div>
           </div>
           <div className="quote">
-            <span className="muted">Premium</span>
+            <span className="muted">Premium{subsidy > 0n ? " you pay" : ""}</span>
             <b>{quote !== null && sumOk ? `${fmt(quote)} RWF` : "-"}</b>
+            {subsidy > 0n && quote !== null && sumOk && <span className="muted">Government subsidy pays {fmt(subsidy)} RWF of {fmt(quote + subsidy)} RWF</span>}
           </div>
         </Box>
       )}
@@ -370,6 +380,7 @@ export function BuyCover({ ctx, snap, address, run, busy, go, intent }) {
               ["Sum insured", `${fmt(sum)} RWF`],
               ["Cover period", `${longDate(startTs)} to ${longDate(endTs)}${startOffset === 0 ? " (starts when you pay)" : ""}`],
               ["Premium due now", <b>{fmt(quote)} RWF</b>],
+              ...(subsidy > 0n ? [["Government subsidy", `${fmt(subsidy)} RWF (not charged to you)`]] : []),
               ["Length", `${coverDays} days`],
             ]} />
           </Box>

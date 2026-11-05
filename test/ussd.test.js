@@ -6,6 +6,7 @@ const path = require("path");
 const { artifacts } = require("hardhat");
 const { ethers, loadFixture, time, farmerFixture, signAttestation, b32, hash } = require("./helpers");
 const { createUssd } = require("../services/ussd-core");
+const dbm = require("../web/server/db");
 
 const PIN = "1234";
 const ALINE = "250788000001"; // registered by farmerFixture (farmer), phone hash on-chain
@@ -14,16 +15,15 @@ const STRANGER = "250788000777";
 const DAY = 86400;
 
 describe("USSD channel (monitoring and claim registration only)", function () {
-  let ctx, u, agent, seen, usersFile;
+  let ctx, u, agent, seen, db;
 
   async function build(base) {
     const abi = {
       ledger: (await artifacts.readArtifact("FarmLedger")).abi,
       token: (await artifacts.readArtifact("MockRWF")).abi,
     };
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ussd-"));
-    usersFile = path.join(dir, "users.json");
-    return createUssd({ provider: ethers.provider, abi, ledgerAddress: base.ledgerAddr, agent, usersFile });
+    db = dbm.open(":memory:");
+    return createUssd({ provider: ethers.provider, abi, ledgerAddress: base.ledgerAddr, agent, db });
   }
 
   beforeEach(async () => {
