@@ -11,5 +11,11 @@
     "vet": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
     "claimsAgent": "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"
   },
-  "deployedAt": "2026-10-25T17:47:03.594Z"
+  "aa": {
+    "entryPoint": "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318",
+    "accountFactory": "0x610178dA211FEF7D417bC0e6FeD39F05609AD788",
+    "paymaster": "0xB7f8BC63BbcaD18155201308C8f3540b07f84F5e",
+    "bundlerUrl": "http://localhost:4337"
+  },
+  "deployedAt": "2026-11-03T22:19:02.973Z"
 }
