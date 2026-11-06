@@ -10,3 +10,4 @@ web/.data/
 web/.next/
 web/node_modules/
 'Claude outputs'/
+.env.example
