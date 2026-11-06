@@ -7,7 +7,10 @@ import { SmartAccountSigner, deviceOwner } from "../../lib/smart-account";
 import { relevantEvents, eventText, farmerEventText } from "../../lib/format";
 import { Box, Icon, TxStatus } from "../../components/ui";
 import { Overview as FarmerOverview, Assets, Policies } from "../../views/farmer";
-import { BuyCover } from "../../views/booking";
+import { ApplicationForm } from "../../views/application";
+import { AgentFarmers, AgentApplications } from "../../views/agent";
+import { UwDesk } from "../../views/desk";
+import { FarmerOffers } from "../../views/offers";
 import { Products } from "../../views/products";
 import { VetOverview, VetClaims, VetProfile } from "../../views/vet";
 import { UwOverview, UwProducts } from "../../views/underwriter";
@@ -16,22 +19,24 @@ import { AdminOverview, AdminVets, AdminAccess, AdminGov } from "../../views/adm
 import { AuditView, DemoView } from "../../views/shared";
 
 const NAV = {
-  farmer: [["overview", "Home", "home"], ["assets", "My farm", "grid"], ["products", "Cover options", "box"], ["buy", "Apply for cover", "shield"], ["policies", "Policies and claims", "file"]],
+  farmer: [["overview", "Home", "home"], ["assets", "My farm", "grid"], ["products", "Cover options", "box"], ["offers", "Applications and contracts", "shield"], ["policies", "Policies and claims", "file"]],
+  agent: [["overview", "My farmers", "user"], ["apply", "New application", "shield"], ["applications", "Applications", "file"]],
   vet: [["overview", "Overview", "home"], ["claims", "Claims queue", "pulse"], ["profile", "My certification", "user"]],
-  underwriter: [["overview", "Portfolio", "home"], ["products", "Products", "box"], ["policies", "Policies", "file"]],
+  underwriter: [["overview", "Portfolio", "home"], ["desk", "Application desk", "shield"], ["products", "Products", "box"], ["policies", "Policies", "file"]],
   admin: [["overview", "Overview", "home"], ["vets", "Veterinarians", "pulse"], ["access", "Access control", "lock"], ["gov", "Governance", "sliders"]],
   oracle: [],
 };
 const SHARED = [["audit", "Audit trail", "search"], ["demo", "Test tools", "flask"]];
 const SUBTITLE = {
-  overview: "Your account at a glance", buy: "Choose cover, add documents, pay the premium", assets: "The plots and animals you can insure", policies: "Track your cover, claims and payments",
+  overview: "Your account at a glance", offers: "What your agent applied for, and contracts to accept",
+  apply: "Fill in an application with your farmer", applications: "Applications you submitted, and their status", desk: "Review applications and draft contracts", assets: "The plots and animals you can insure", policies: "Track your cover, claims and payments",
   uwPolicies: "Every policy on your products, with its policy document",
   farmerProducts: "What each cover pays for, what it costs and what you need",
   claims: "Livestock claims awaiting verification", profile: "Your veterinary licence on record", products: "Cover products and pricing",
   vets: "Certification, licences and claim quorum", access: "Who can do what on the platform", gov: "Platform controls", audit: "Every action recorded on the ledger",
   demo: "Simulate weather data and the passing of time on the test network",
 };
-const ROLE_LABEL = { farmer: "Farmer", vet: "Veterinarian", underwriter: "Underwriter", admin: "Administrator", oracle: "Oracle" };
+const ROLE_LABEL = { agent: "Insurance agent", farmer: "Farmer", vet: "Veterinarian", underwriter: "Underwriter", admin: "Administrator", oracle: "Oracle" };
 
 export default function Home() {
   const [cfg, setCfg] = useState(null);
@@ -86,7 +91,8 @@ export default function Home() {
       const addr = await signer.getAddress();
       const l = new ethers.Contract(cfg.dep.ledger, cfg.abi.ledger, provider);
       const [isAdmin, isUw, vp] = await Promise.all([l.hasRole(await l.DEFAULT_ADMIN_ROLE(), addr), l.hasRole(await l.UNDERWRITER_ROLE(), addr), l.getVetProfile(addr)]);
-      const role = isAdmin ? "admin" : isUw ? "underwriter" : Number(vp.certifiedAt) > 0 ? "vet" : "farmer";
+      const isAgent = cfg.dep.policyDesk ? await new ethers.Contract(cfg.dep.policyDesk, cfg.abi.policyDesk, provider).isAgent(addr) : false;
+      const role = isAdmin ? "admin" : isUw ? "underwriter" : Number(vp.certifiedAt) > 0 ? "vet" : isAgent ? "agent" : "farmer";
       setOwn((o) => ({ ...o, wallet: { key: "wallet", label: `Browser wallet ${short(addr)} (${ROLE_LABEL[role]})`, role, kind: "wallet", addr, signer } }));
       switchAccount("wallet");
       setStatus({ label, state: "ok" });
@@ -160,9 +166,10 @@ export default function Home() {
   const r = account.role;
   if (view === "audit") body = <AuditView snap={snap} />;
   else if (view === "demo") body = <DemoView {...props} />;
-  else if (r === "farmer") body = { overview: <FarmerOverview {...props} />, products: <Products {...props} />, buy: <BuyCover key={intent?.pid || "buy"} {...props} />, assets: <Assets {...props} />, policies: <Policies {...props} /> }[view];
+  else if (r === "farmer") body = { overview: <FarmerOverview {...props} />, products: <Products {...props} />, offers: <FarmerOffers {...props} />, assets: <Assets {...props} />, policies: <Policies {...props} /> }[view];
+  else if (r === "agent") body = { overview: <AgentFarmers key={intent?.farmer || "f"} {...props} />, apply: <ApplicationForm key={intent?.farmer || "apply"} {...props} />, applications: <AgentApplications {...props} /> }[view];
   else if (r === "vet") body = { overview: <VetOverview {...props} />, claims: <VetClaims {...props} />, profile: <VetProfile {...props} /> }[view];
-  else if (r === "underwriter") body = { overview: <UwOverview {...props} />, products: <UwProducts {...props} />, policies: <UwPolicies {...props} /> }[view];
+  else if (r === "underwriter") body = { overview: <UwOverview {...props} />, desk: <UwDesk {...props} />, products: <UwProducts {...props} />, policies: <UwPolicies {...props} /> }[view];
   else if (r === "admin") body = { overview: <AdminOverview {...props} />, vets: <AdminVets {...props} />, access: <AdminAccess {...props} />, gov: <AdminGov {...props} /> }[view];
   else body = <Box title="Oracle account" sub="The oracle posts rainfall / NDVI readings. Use Test tools, or run npm run oracle." />;
   if (!body) body = <Box title="Not available for this role" />;

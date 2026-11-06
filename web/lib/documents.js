@@ -33,10 +33,14 @@ export async function validateFile(file) {
 
 const now = () => Math.floor(Date.now() / 1000);
 
+// Every request is signed. When the signer is not the applicant (their insurance agent, the product's underwriter, a
+// vet, an auditor) the request also names the signer, and the server checks that person's role on-chain.
 async function signed(signer, fields) {
   const issued = now();
   const msg = signing.message({ ...fields, issued });
-  return { issued, signature: await signer.signMessage(msg) };
+  const me = await signer.getAddress();
+  const actor = me.toLowerCase() === String(fields.applicant).toLowerCase() ? null : me;
+  return { issued, signature: await signer.signMessage(msg), actor };
 }
 async function parse(res) {
   let body = null;
@@ -46,47 +50,70 @@ async function parse(res) {
 }
 
 export async function listDocuments(signer, applicant, application) {
-  const { issued, signature } = await signed(signer, { action: "list", applicant, application });
+  const { issued, signature, actor } = await signed(signer, { action: "list", applicant, application });
   const q = new URLSearchParams({ applicant, issued: String(issued), signature });
+  if (actor) q.set("signer", actor);
   return (await parse(await fetch(`/api/applications/${application}/documents?${q}`, { cache: "no-store" }))).documents;
 }
 
 export async function uploadDocument(signer, applicant, application, document, file, sha256) {
-  const { issued, signature } = await signed(signer, { action: "upload", applicant, application, document, sha256, filename: file.name });
+  const { issued, signature, actor } = await signed(signer, { action: "upload", applicant, application, document, sha256, filename: file.name });
   const form = new FormData();
   form.set("file", file); form.set("applicant", applicant); form.set("document", document);
   form.set("sha256", sha256); form.set("issued", String(issued)); form.set("signature", signature);
+  if (actor) form.set("signer", actor);
   return (await parse(await fetch(`/api/applications/${application}/documents`, { method: "POST", body: form }))).document;
 }
 
 export async function removeDocument(signer, applicant, application, document) {
-  const { issued, signature } = await signed(signer, { action: "delete", applicant, application, document });
+  const { issued, signature, actor } = await signed(signer, { action: "delete", applicant, application, document });
   return parse(await fetch(`/api/applications/${application}/documents`, {
-    method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ applicant, document, issued, signature }),
+    method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ applicant, document, issued, signature, signer: actor }),
   }));
 }
 
 export async function finalizeApplication(signer, applicant, application, ctx, answers) {
   // The signature covers a hash of exactly what is sent, so it cannot be altered in transit.
   const payloadHash = await sha256Hex(new Blob([JSON.stringify({ ctx, answers })]));
-  const { issued, signature } = await signed(signer, { action: "submit", applicant, application, sha256: payloadHash });
+  const { issued, signature, actor } = await signed(signer, { action: "submit", applicant, application, sha256: payloadHash });
   return parse(await fetch(`/api/applications/${application}`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ applicant, ctx, answers, issued, signature }),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ applicant, ctx, answers, issued, signature, signer: actor }),
   }));
 }
 
-export async function linkApplication(signer, applicant, application, policyId) {
-  const { issued, signature } = await signed(signer, { action: "link", applicant, application, document: `policy-${Number(policyId)}` });
+// After the agent submitted the application on-chain: link the stored record to its PolicyDesk number.
+export async function linkDeskApplication(signer, applicant, application, deskId) {
+  const { issued, signature, actor } = await signed(signer, { action: "link", applicant, application, document: `desk-${Number(deskId)}` });
   return parse(await fetch(`/api/applications/${application}`, {
-    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ applicant, policyId, issued, signature }),
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ applicant, deskId: Number(deskId), issued, signature, signer: actor }),
   }));
 }
 
-// Download a stored document. `asReviewer`: the signer is not the applicant (a certified vet viewing claim evidence).
-export async function fetchStored(signer, applicant, application, document, { asReviewer = false } = {}) {
-  const { issued, signature } = await signed(signer, { action: "view", applicant, application, document });
+// The finalized application (answers, documents) plus the underwriter's contract or rejection, if any.
+export async function fetchApplicationRecord(signer, applicant, application) {
+  const { issued, signature, actor } = await signed(signer, { action: "view", applicant, application, document: "application" });
   const q = new URLSearchParams({ applicant, issued: String(issued), signature });
-  if (asReviewer) q.set("signer", await signer.getAddress());
+  if (actor) q.set("signer", actor);
+  return parse(await fetch(`/api/applications/${application}?${q}`, { cache: "no-store" }));
+}
+
+// The underwriter stores the drafted contract (or the reasons for a rejection) and gets the hash to record on-chain.
+export async function postDecision(signer, applicant, application, deskId, kind, content) {
+  const sha256 = await sha256Hex(new Blob([JSON.stringify(content)]));
+  const issued = now();
+  const msg = signing.message({ action: "decision", applicant, application, document: `${kind}-${Number(deskId)}`, sha256, issued });
+  const signature = await signer.signMessage(msg);
+  return parse(await fetch(`/api/applications/${application}/decision`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ applicant, deskId: Number(deskId), kind, content, issued, signature, signer: await signer.getAddress() }),
+  }));
+}
+
+// Download a stored document (as the applicant, or as someone the server allows: agent, underwriter, vet, auditor).
+export async function fetchStored(signer, applicant, application, document) {
+  const { issued, signature, actor } = await signed(signer, { action: "view", applicant, application, document });
+  const q = new URLSearchParams({ applicant, issued: String(issued), signature });
+  if (actor) q.set("signer", actor);
   const res = await fetch(`/api/applications/${application}/documents/${document}?${q}`, { cache: "no-store" });
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not open the document.");
   return res.blob();
@@ -112,4 +139,14 @@ export async function saveContact(signer, address, phone) {
   const msg = signing.message({ action: "contact", applicant: address, application: "contact-details", document: phone, issued });
   const signature = await signer.signMessage(msg);
   return parse(await fetch("/api/contacts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ address, phone, issued, signature }) }));
+}
+
+// A submitted application by its PolicyDesk number (form, documents, contract / rejection), for the farmer, their
+// agent, its underwriter or an auditor.
+export async function fetchDeskRecord(signer, farmer, deskId) {
+  const issued = now();
+  const msg = signing.message({ action: "view", applicant: farmer, application: `desk-${Number(deskId)}`, document: "application", issued });
+  const signature = await signer.signMessage(msg);
+  const q = new URLSearchParams({ signer: await signer.getAddress(), issued: String(issued), signature });
+  return parse(await fetch(`/api/desk/${Number(deskId)}?${q}`, { cache: "no-store" }));
 }

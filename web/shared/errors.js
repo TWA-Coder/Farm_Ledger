@@ -46,6 +46,19 @@ const PLAIN = {
   WrongCover: "Livestock claims are checked by vets. Report the animal's death from the livestock claim screen.",
   AmountMismatch: "Another reviewer already approved a different amount. Approve the same amount, or reject the claim.",
   Paused: "The platform is paused by the administrator. Try again later.",
+  // PolicyDesk.sol
+  NotAgent: "This account is not an active insurance agent.",
+  NotYourAgent: "That agent belongs to another insurer.",
+  NotYourFarmer: "This farmer is not assigned to you.",
+  AlreadyAgent: "This account is already an agent.",
+  AlreadyJoined: "This farmer already has an agent.",
+  WrongUnderwriter: "Agents can only apply for their own insurer's products.",
+  NotFarmerOfApplication: "Only the farmer can accept or decline this contract.",
+  BadStatus: "This application is not at a stage where that is possible.",
+  OfferExpired: "This contract offer has expired. Ask your agent to request a new one.",
+  TooMany: "The limit was reached.",
+  // MockRWF.sol
+  NotMinter: "Only the treasury can create test money on this network.",
 };
 
 module.exports = { PLAIN };

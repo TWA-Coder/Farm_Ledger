@@ -59,7 +59,7 @@ export function Products({ snap, go }) {
               </dd>
               <dt>Rules</dt><dd><ul className="plainlist">{rulesFor(cover, snap).map((r, i) => <li key={i}>{r}</li>)}</ul></dd>
             </dl>
-            <button className="btn" onClick={() => go("buy", { pid: p.id })}>Apply for {info.name.toLowerCase()}</button>
+            <p className="muted">To apply for {info.name.toLowerCase()}, ask your insurance agent: they fill in the application with you and the insurer drafts your contract.</p>
           </Box>
         );
       })}

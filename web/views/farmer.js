@@ -14,13 +14,13 @@ const POLICY_TONE = ["g", "a", "i", "n"]; // Active, ClaimPending, PaidOut, Expi
 const TEST_FUNDS = 100000;
 
 // District centres (approximate) so farmers do not have to type GPS coordinates. Exact GPS can still be entered.
-const DISTRICTS = [
+export const DISTRICTS = [
   ["Bugesera", -2.15, 30.15], ["Gatsibo", -1.58, 30.42], ["Huye", -2.6, 29.74], ["Kayonza", -1.9, 30.5],
   ["Kirehe", -2.27, 30.65], ["Muhanga", -2.08, 29.75], ["Musanze", -1.5, 29.63], ["Ngoma", -2.16, 30.47],
   ["Nyagatare", -1.3, 30.33], ["Nyanza", -2.35, 29.75], ["Rubavu", -1.7, 29.35], ["Rwamagana", -1.95, 30.43],
 ];
-const CROPS = [["MAIZE", "Maize"], ["BEANS", "Beans"], ["RICE", "Rice"], ["IRISH_POTATO", "Irish potato"], ["CASSAVA", "Cassava"], ["SORGHUM", "Sorghum"], ["PASTURE", "Pasture"]];
-const BREEDS = [["FRIESIAN", "Friesian"], ["JERSEY", "Jersey"], ["ANKOLE", "Ankole"], ["CROSSBREED", "Crossbreed"], ["OTHER", "Other"]];
+export const CROPS = [["MAIZE", "Maize"], ["BEANS", "Beans"], ["RICE", "Rice"], ["IRISH_POTATO", "Irish potato"], ["CASSAVA", "Cassava"], ["SORGHUM", "Sorghum"], ["PASTURE", "Pasture"]];
+export const BREEDS = [["FRIESIAN", "Friesian"], ["JERSEY", "Jersey"], ["ANKOLE", "Ankole"], ["CROSSBREED", "Crossbreed"], ["OTHER", "Other"]];
 
 const cropName = (b) => { const c = fromB32(b); return (CROPS.find((x) => x[0] === c) || [c, c.charAt(0) + c.slice(1).toLowerCase()])[1]; };
 const ha = (m2) => (Number(m2) / 10000).toLocaleString("en-US", { maximumFractionDigits: 2 });
@@ -28,7 +28,7 @@ const nearestDistrict = (p) => {
   const lat = Number(p.latE6) / 1e6, lon = Number(p.lonE6) / 1e6;
   return DISTRICTS.reduce((best, d) => (Math.hypot(d[1] - lat, d[2] - lon) < Math.hypot(best[1] - lat, best[2] - lon) ? d : best))[0];
 };
-const plotLabel = (p) => `Plot #${p.id} · ${cropName(p.crop)}, ${ha(p.areaM2)} ha near ${nearestDistrict(p)}`;
+export const plotLabel = (p) => `Plot #${p.id} · ${cropName(p.crop)}, ${ha(p.areaM2)} ha near ${nearestDistrict(p)}`;
 const testFunds = (ctx, address, run) => run("Adding test money", async () => (await ctx.token.mint(address, TEST_FUNDS)).wait());
 
 // ---------------------------------------------------------------- registration

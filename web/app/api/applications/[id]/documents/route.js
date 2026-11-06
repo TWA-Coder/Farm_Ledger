@@ -4,9 +4,10 @@ import req from "../../../../../shared/requirements";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-const { store, json, fail, authenticate } = http;
+const { store, json, fail, authorizeWrite, authorizeRead } = http;
 
-// Upload or replace one document. multipart/form-data: file, applicant, document, sha256, issued, signature
+// Upload or replace one document. multipart/form-data: file, applicant, document, sha256, issued, signature, signer
+// (the applicant, or their insurance agent)
 export async function POST(request, { params }) {
   try {
     const length = Number(request.headers.get("content-length") || 0);
@@ -18,7 +19,7 @@ export async function POST(request, { params }) {
     const application = params.id;
     const applicant = f("applicant"), document = f("document"), sha256 = f("sha256");
     core.checkIds({ applicant, application, document });
-    await authenticate({ action: "upload", applicant, application, document, sha256, filename: file.name, issued: f("issued"), signature: f("signature") });
+    await authorizeWrite({ action: "upload", applicant, application, document, sha256, filename: file.name, issued: f("issued"), signature: f("signature") }, f("signer") || null);
     const buffer = Buffer.from(await file.arrayBuffer());
     core.inspectUpload(buffer, sha256); // size, real content type, and hash must match what was signed
     const meta = store.put({ applicant, application, document, buffer, originalName: file.name });
@@ -32,18 +33,18 @@ export async function DELETE(request, { params }) {
     const b = await request.json();
     const application = params.id;
     core.checkIds({ applicant: b.applicant, application, document: b.document });
-    await authenticate({ action: "delete", applicant: b.applicant, application, document: b.document, issued: b.issued, signature: b.signature });
+    await authorizeWrite({ action: "delete", applicant: b.applicant, application, document: b.document, issued: b.issued, signature: b.signature }, b.signer);
     return json({ removed: store.remove({ applicant: b.applicant, application, document: b.document }) });
   } catch (e) { return fail(e); }
 }
 
-// List what is on file for this application (plus the applicant's reusable profile documents).
+// List what is on file for this application (plus the applicant's reusable profile documents). Readers: see http.js.
 export async function GET(request, { params }) {
   try {
     const q = new URL(request.url).searchParams;
     const application = params.id, applicant = q.get("applicant") || "";
     core.checkIds({ applicant, application });
-    await authenticate({ action: "list", applicant, application, issued: q.get("issued"), signature: q.get("signature") });
+    await authorizeRead({ action: "list", applicant, application, issued: q.get("issued"), signature: q.get("signature") }, q.get("signer"));
     return json({ documents: store.list({ applicant, application }).map(({ id, label, document, scope, originalName, mime, size, sha256, uploadedAt }) => ({ id, label, document, scope, originalName, mime, size, sha256, uploadedAt })) });
   } catch (e) { return fail(e); }
 }

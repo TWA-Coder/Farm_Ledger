@@ -54,4 +54,14 @@ async function ownerOf(address) {
   try { return await new ethers.Contract(address, ["function owner() view returns (address)"], provider).owner(); } catch { return null; }
 }
 
-module.exports = { deployment, isCertifiedVet, ledger, cropClaims, isUnderwriter, ownerOf };
+// Read-only PolicyDesk contract (agent applications, underwriter contracts), or null on an older deployment.
+function policyDesk() {
+  const { ethers } = require("ethers");
+  const dep = deployment();
+  if (!dep.policyDesk) return null;
+  const abi = JSON.parse(fs.readFileSync(path.join(PUBLIC_DIR, "abi.json"), "utf8"));
+  const provider = new ethers.JsonRpcProvider(process.env.RPC_URL || dep.rpcUrl, undefined, { staticNetwork: true });
+  return new ethers.Contract(dep.policyDesk, abi.policyDesk, provider);
+}
+
+module.exports = { deployment, isCertifiedVet, ledger, cropClaims, policyDesk, isUnderwriter, ownerOf };

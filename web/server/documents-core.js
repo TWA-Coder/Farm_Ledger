@@ -179,6 +179,56 @@ class DocumentStore {
     return null;
   }
 
+  // The finalized application record (answers, product, documents' hashes), or null.
+  readApplication({ applicant, application }) {
+    checkIds({ applicant, application });
+    const f = path.join(this.dirFor(applicant, application, "application"), "application.json");
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : null;
+  }
+
+  // Link the finalized application to its PolicyDesk application id (set once, when the agent submits it on-chain).
+  linkDesk({ applicant, application, deskApplicationId }) {
+    const rec = this.readApplication({ applicant, application });
+    if (!rec) throw new DocError(404, "Application not finalized.");
+    if (rec.deskApplicationId && Number(rec.deskApplicationId) !== Number(deskApplicationId)) throw new DocError(409, "Application already submitted under another number.");
+    rec.deskApplicationId = Number(deskApplicationId);
+    rec.submittedAt = new Date().toISOString();
+    fs.writeFileSync(path.join(this.dirFor(applicant, application, "application"), "application.json"), JSON.stringify(rec, null, 2), { mode: 0o600 });
+    return rec;
+  }
+
+  // The application submitted as PolicyDesk application `deskApplicationId` (null if none).
+  findForDesk({ applicant, deskApplicationId }) {
+    if (!ADDRESS_RE.test(applicant || "")) throw new DocError(400, "Invalid applicant.");
+    const base = path.join(this.root, String(applicant).toLowerCase());
+    if (!fs.existsSync(base)) return null;
+    for (const dir of fs.readdirSync(base)) {
+      const f = path.join(base, dir, "application.json");
+      if (!APP_ID_RE.test(dir) || !fs.existsSync(f)) continue;
+      const rec = JSON.parse(fs.readFileSync(f, "utf8"));
+      if (Number(rec.deskApplicationId) === Number(deskApplicationId)) return { ...rec, application: dir };
+    }
+    return null;
+  }
+
+  // The underwriter's contract (or rejection reasons) for a submitted application, stored next to it. The hash is
+  // what PolicyDesk records on-chain, so the document can never be changed afterwards without detection.
+  putDecision({ applicant, application, kind, content, by }) {
+    if (!["contract", "rejection"].includes(kind)) throw new DocError(400, "Unknown decision.");
+    const rec = this.readApplication({ applicant, application });
+    if (!rec) throw new DocError(404, "Application not finalized.");
+    const record = { kind, application, deskApplicationId: rec.deskApplicationId ?? null, applicationHash: rec.applicationHash, content, by: String(by).toLowerCase() };
+    const hash = "0x" + sha256Hex(Buffer.from(JSON.stringify(record)));
+    fs.writeFileSync(path.join(this.dirFor(applicant, application, "application"), `${kind}.json`), JSON.stringify({ ...record, hash, writtenAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+    return { hash, record };
+  }
+
+  getDecision({ applicant, application, kind }) {
+    checkIds({ applicant, application });
+    const f = path.join(this.dirFor(applicant, application, "application"), `${kind}.json`);
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : null;
+  }
+
   link({ applicant, application, policyId }) {
     checkIds({ applicant, application });
     const f = path.join(this.dirFor(applicant, application, "application"), "application.json");

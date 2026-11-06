@@ -85,10 +85,48 @@ export async function loadSnapshot({ ctx, provider, cfg, address, account }) {
   }
 
   const [allowance, paused, waiting] = await Promise.all([token.allowance(address, cfg.dep.ledger), ledger.paused(), ledger.waitingPeriod()]);
+  const desk = ctx.desk ? await loadDesk({ ctx, events, address, account }) : null;
   return {
     now: Number(latest.timestamp), farmer, balance, products, plots, animals, policies, events, claims, vets, vetQuorum, myVet,
     pool, plotCount: Number(plotCount), allowance, paused, waiting,
+    applications: desk?.applications || [], myAgent: desk?.myAgent || null, agent: desk?.agent || null,
   };
+}
+
+// PolicyDesk: every application with its current status, and for each role what it needs:
+//   farmer: its agent; agent: its insurer and farmers (with their plots and animals); underwriter: its applications.
+const APP_STATUS = ["None", "Submitted", "Offered", "Rejected", "Declined", "Issued"];
+async function loadDesk({ ctx, events, address, account }) {
+  const { desk, ledger } = ctx;
+  const me = address.toLowerCase();
+  const ids = events.filter((e) => e.name === "ApplicationSubmitted").map((e) => Number(e.args.applicationId));
+  const applications = (await Promise.all(ids.map(async (id) => {
+    const a = pick(await desk.getApplication(id));
+    const submitted = events.find((e) => e.name === "ApplicationSubmitted" && Number(e.args.applicationId) === id);
+    return { id, ...a, statusName: APP_STATUS[Number(a.status)], status: Number(a.status), submittedBlock: submitted?.block };
+  }))).filter((a) => [a.farmer, a.agent, a.underwriter].some((x) => x.toLowerCase() === me) || account.role === "admin");
+  applications.sort((x, y) => y.id - x.id);
+
+  let myAgent = null, agent = null;
+  if (account.role === "farmer") {
+    const ag = await desk.agentOf(address);
+    myAgent = ag === ethers.ZeroAddress ? null : { address: ag, label: DEMO_ACCOUNTS.find((d) => d.addr?.toLowerCase() === ag.toLowerCase())?.label || ag, district: fromB32(await desk.districtOf(address)) };
+  }
+  const info = pick(await desk.getAgent(address));
+  if (info.underwriter !== ethers.ZeroAddress) {
+    const assigned = [...new Set(events.filter((e) => e.name === "FarmerAssigned" && e.args.agent.toLowerCase() === me).map((e) => e.args.farmer))];
+    const farmers = [];
+    for (const f of assigned) {
+      if ((await desk.agentOf(f)).toLowerCase() !== me) continue; // reassigned since
+      const [plotIds, animalIds] = await Promise.all([ledger.plotsOf(f), ledger.animalsOf(f)]);
+      const plots = await Promise.all(plotIds.map(async (id) => ({ id: Number(id), ...pick(await ledger.getPlot(id)) })));
+      const animals = await Promise.all(animalIds.map(async (id) => ({ id: Number(id), ...pick(await ledger.getAnimal(id)) })));
+      const demo = DEMO_ACCOUNTS.find((d) => d.addr?.toLowerCase() === f.toLowerCase());
+      farmers.push({ address: f, label: demo?.label || `Farmer ${f.slice(0, 6)}…${f.slice(-4)}`, district: fromB32(await desk.districtOf(f)), plots, animals });
+    }
+    agent = { underwriter: info.underwriter, active: info.active, districts: (await desk.districtsOfAgent(address)).map(fromB32), farmers };
+  }
+  return { applications, myAgent, agent };
 }
 
 export { ethers };

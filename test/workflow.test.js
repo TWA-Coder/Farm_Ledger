@@ -7,8 +7,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const {
-  ethers, loadFixture, time, b32, hash, Metric, PolicyStatus, ClaimStatus, deployFixture, signAttestation,
-} = require("./helpers");
+  ethers, loadFixture, time, b32, hash, Metric, PolicyStatus, ClaimStatus, deployFixture, signAttestation, buyFor } = require("./helpers");
 const core = require("../web/server/documents-core");
 const http = require("../web/server/http");
 const claims = require("../web/shared/claims");
@@ -42,7 +41,7 @@ describe("End-to-end insurance workflow", function () {
     const quote = await ledger.quotePremium(1, 200_000);
     expect(quote).to.equal(20_000n);
     const before = await token.balanceOf(farmer.address);
-    const rc = await (await ledger.connect(farmer).buyPolicy(1, 1, 200_000)).wait();
+    const rc = await (await buyFor(ledger, farmer, 1, 1, 200_000)).wait();
     const [bought] = eventsOf(ledger, rc, "PolicyPurchased");
     expect(bought.args.premium).to.equal(quote);
     expect((await ledger.poolStats(underwriter.address)).reserved).to.equal(200_000n);
@@ -74,7 +73,7 @@ describe("End-to-end insurance workflow", function () {
     await ledger.connect(farmer).registerFarmer(hash("1199080012345678"), hash("250788000001"));
     expect(validation.validateAnimal({ tag: "990000015066386", year: "2021" }, 2026)).to.deep.equal({});
     await ledger.connect(farmer).registerAnimal(b32("990000015066386"), b32("FRIESIAN"), 2021, hash("animal:990000015066386"));
-    await ledger.connect(farmer).buyPolicy(4, 1, 300_000);
+    await buyFor(ledger, farmer, 4, 1, 300_000);
 
     // 7. claim initiation is refused during the waiting period
     await expect(ledger.connect(farmer).fileClaim(1, "0x" + sha256(JPG))).to.be.revertedWithCustomError(ledger, "WaitingPeriodNotElapsed");
@@ -95,25 +94,33 @@ describe("End-to-end insurance workflow", function () {
     const hit = store.get({ applicant: farmer.address, application: claims.claimApplicationId(c.policyId, c.evidenceHash), document: claims.EVIDENCE_DOCUMENT });
     expect("0x" + sha256(fs.readFileSync(hit.path))).to.equal(c.evidenceHash);
 
-    // 8. vet access to the photo: certified vets yes, anyone else no (certification read from the contract)
+    // 8. document access (web/server/http.js authorizeRead), roles read from the contract
     const isCertifiedVet = (a) => ledger.isCertifiedVet(a);
-    const UW = await ledger.UNDERWRITER_ROLE();
-    const isUnderwriter = (a) => ledger.hasRole(UW, a);
-    const viewAs = async (wallet) => {
-      const params = { action: "view", applicant: farmer.address, application: app, document: claims.EVIDENCE_DOCUMENT, issued: now() };
-      params.signature = await wallet.signMessage(core.message(params));
-      return http.authenticateView(params, wallet.address, { isCertifiedVet, isUnderwriter });
+    const underwriterOfProduct = async (pid) => (await ledger.getProduct(pid)).underwriter;
+    const viewsLogged = [];
+    const deps = { isCertifiedVet, underwriterOfProduct, isAgentOf: async () => false, ownerOf: async () => null, store, logAccess: (e) => viewsLogged.push(e) };
+    const viewAs = async (wallet, params) => {
+      const p = { ...params, issued: now() };
+      p.signature = await wallet.signMessage(core.message(p));
+      return http.authorizeRead(p, wallet.address, deps);
     };
-    expect((await viewAs(vet)).toLowerCase()).to.equal(vet.address.toLowerCase());
-    await expect(viewAs(outsider)).to.be.rejectedWith("Only a currently certified veterinarian");
-    // ...and the vet exception covers claim evidence only, never application documents
-    const idParams = { action: "view", applicant: farmer.address, application: "11111111-aaaa-bbbb-cccc-222222222222", document: "national_id", issued: now() };
-    idParams.signature = await vet.signMessage(core.message(idParams));
-    await expect(http.authenticateView(idParams, vet.address, { isCertifiedVet, isUnderwriter })).to.be.rejectedWith("Signature does not match");
-    // the underwriter (insurer) may open application documents, e.g. for the policy document
-    const uwParams = { ...idParams, issued: now() };
-    uwParams.signature = await underwriter.signMessage(core.message(uwParams));
-    expect((await http.authenticateView(uwParams, underwriter.address, { isCertifiedVet, isUnderwriter })).toLowerCase()).to.equal(underwriter.address.toLowerCase());
+    const evidence = { action: "view", applicant: farmer.address, application: app, document: claims.EVIDENCE_DOCUMENT };
+    expect((await viewAs(vet, evidence)).role).to.equal("vet");
+    await expect(viewAs(outsider, evidence)).to.be.rejectedWith("Only a currently certified veterinarian");
+    // the vet exception covers claim evidence only, never application documents
+    const appId = "11111111-aaaa-bbbb-cccc-222222222222";
+    store.put({ applicant: farmer.address, application: appId, document: "national_id", buffer: JPG, originalName: "id.jpg" });
+    const idDoc = { action: "view", applicant: farmer.address, application: appId, document: "national_id" };
+    await expect(viewAs(vet, idDoc)).to.be.rejectedWith("not allowed");
+    // the insurer sees an application only once it is FOR ITS PRODUCT (not every insurer sees every applicant)
+    await expect(viewAs(underwriter, idDoc)).to.be.rejectedWith("not allowed"); // no finalized application yet
+    const fs2 = require("fs"), path2 = require("path");
+    const appDir = path2.join(dir, farmer.address.toLowerCase(), appId);
+    fs2.mkdirSync(appDir, { recursive: true });
+    fs2.writeFileSync(path2.join(appDir, "application.json"), JSON.stringify({ application: appId, ctx: { productId: 4 }, applicationHash: "0x00" }));
+    expect((await viewAs(underwriter, idDoc)).role).to.equal("underwriter");
+    await expect(viewAs(outsider, idDoc)).to.be.rejectedWith("not allowed");
+    expect(viewsLogged.map((e) => `${e.role}:${e.document}`)).to.deep.equal(["vet:claim_photo", "underwriter:national_id"]); // every granted view is logged
 
     // 8-9. multisignature decision: first vet does not pay, second completes the quorum and pays
     const deadline = (await time.latest()) + 3600;
@@ -133,12 +140,12 @@ describe("End-to-end insurance workflow", function () {
   it("refuses the actions the portal guards against", async () => {
     const { ledger, token, farmer, outsider } = await loadFixture(deployFixture);
     // unregistered account cannot buy
-    await expect(ledger.connect(outsider).buyPolicy(1, 1, 1000)).to.be.revertedWithCustomError(ledger, "NotRegistered");
+    await expect(buyFor(ledger, outsider, 1, 1, 1000)).to.be.revertedWithCustomError(ledger, "NotRegistered");
     // a registered farmer without enough money cannot buy (the portal checks the balance first)
     await ledger.connect(outsider).registerFarmer(hash("1199000000000009"), hash("250788000009"));
     await ledger.connect(outsider).registerPlot(-2_150_000, 30_150_000, 5000, b32("MAIZE"), hash("p"));
     await token.connect(outsider).approve(await ledger.getAddress(), ethers.MaxUint256);
-    await expect(ledger.connect(outsider).buyPolicy(1, 1, 200_000)).to.be.reverted;
+    await expect(buyFor(ledger, outsider, 1, 1, 200_000)).to.be.reverted;
     // the same National ID cannot register twice
     await expect(ledger.connect(farmer).registerFarmer(hash("1199000000000009"), hash("250788000010"))).to.be.revertedWithCustomError(ledger, "IdAlreadyUsed");
   });
@@ -206,8 +213,8 @@ describe("Portal support code", function () {
     }
   });
 
-  it("every FarmLedger and CropClaims contract error has a plain-language message", () => {
-    const src = ["FarmLedger.sol", "CropClaims.sol"].map((f) => fs.readFileSync(path.join(__dirname, "..", "contracts", f), "utf8")).join("\n");
+  it("every contract error (FarmLedger, CropClaims, PolicyDesk, MockRWF) has a plain-language message", () => {
+    const src = ["FarmLedger.sol", "CropClaims.sol", "PolicyDesk.sol", "MockRWF.sol"].map((f) => fs.readFileSync(path.join(__dirname, "..", "contracts", f), "utf8")).join("\n");
     const names = [...src.matchAll(/^\s*error (\w+)\(/gm)].map((m) => m[1]);
     expect(names.length).to.be.greaterThan(10);
     const missing = names.filter((n) => !PLAIN[n]);

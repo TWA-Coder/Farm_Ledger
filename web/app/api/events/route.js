@@ -10,8 +10,8 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const ledger = chain.ledger();
-    const claims = chain.cropClaims();
-    const { block } = await indexer.sync({ provider: ledger.runner.provider, ledger, others: claims ? [claims] : [] });
+    const others = [chain.cropClaims(), chain.policyDesk()].filter(Boolean);
+    const { block } = await indexer.sync({ provider: ledger.runner.provider, ledger, others });
     return Response.json({ block, events: indexer.events(undefined, { raw: true }) }, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     console.error("[api/events]", e.shortMessage || e.message);
