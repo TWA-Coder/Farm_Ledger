@@ -1,5 +1,6 @@
-// HTTP front of the USSD service: Africa's Talking USSD callbacks (POST /ussd) and SMS delivery reports
-// (POST /sms/delivery). Kept apart from ussd.js so the access rules can be tested.
+// HTTP front of the USSD service: Africa's Talking USSD callbacks (POST /ussd), Africa's Talking SMS delivery reports
+// (POST /sms/delivery) and the Android SMS gateway webhook (POST /sms/gateway, see sms-channel.js). Kept apart from
+// ussd.js so the access rules can be tested.
 //
 // Requests that came through the public tunnel carry Cloudflare / proxy headers. Those are refused unless the URL has
 // ?key=<CALLBACK_TOKEN>: the phone number in a USSD request is only as trustworthy as whoever sent it, so a stranger
@@ -16,7 +17,7 @@ function tokenOk(req, token) {
   return key.length === token.length && crypto.timingSafeEqual(Buffer.from(key), Buffer.from(token));
 }
 
-function createHandler({ ussd, outbox, token = "", log = console }) {
+function createHandler({ ussd, outbox, smsChannel = null, token = "", log = console }) {
   return async (req, res) => {
     if (req.method === "OPTIONS") { res.writeHead(204, CORS); return res.end(); }
     const route = new URL(req.url, "http://x").pathname;
@@ -25,7 +26,7 @@ function createHandler({ ussd, outbox, token = "", log = console }) {
       res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", ...CORS });
       return res.end("FarmLedger USSD service is running.\n\nThis address is for the phone network (POST /ussd), not for browsers.\nTry it in the simulator: http://localhost:3000/ussd\n");
     }
-    if (req.method !== "POST" || !["/ussd", "/sms/delivery"].includes(route)) { res.writeHead(404, CORS); return res.end("not found"); }
+    if (req.method !== "POST" || !["/ussd", "/sms/delivery", "/sms/gateway"].includes(route)) { res.writeHead(404, CORS); return res.end("not found"); }
     if (!tokenOk(req, token)) {
       log.warn(`[ussd] refused ${route} from the internet: ${token ? "wrong or missing ?key=" : "CALLBACK_TOKEN is not set"}`);
       res.writeHead(403, CORS); return res.end("forbidden");
@@ -33,6 +34,12 @@ function createHandler({ ussd, outbox, token = "", log = console }) {
 
     let body = "";
     for await (const chunk of req) { body += chunk; if (body.length > 10_000) { res.writeHead(413, CORS); return res.end(); } }
+    if (route === "/sms/gateway") {
+      if (!smsChannel) { res.writeHead(404, CORS); return res.end("SMS gateway channel is not enabled"); }
+      const r = await smsChannel.handleWebhook({ raw: body, headers: req.headers });
+      if (r.status !== 200) log.warn(`[sms-gateway] refused webhook: ${r.body}`);
+      res.writeHead(r.status, CORS); return res.end(r.body);
+    }
     const ct = req.headers["content-type"] || "";
     let data;
     try { data = ct.includes("json") ? JSON.parse(body || "{}") : Object.fromEntries(new URLSearchParams(body)); }

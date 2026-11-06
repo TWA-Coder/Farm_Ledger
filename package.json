@@ -15,6 +15,9 @@
     "ussd": "node services/ussd.js",
     "bundler": "node services/bundler.js",
     "accounts": "node services/accounts-cli.js",
+    "phone": "node services/run-phone.js",
+    "custody": "node services/custody.js",
+    "momo": "node services/momo-cli.js",
     "bench": "hardhat run benchmark/benchmark.js",
     "slither": "slither . --hardhat-ignore-compile --filter-paths node_modules",
     "web:install": "npm --prefix web install",
@@ -31,5 +34,8 @@
   },
   "dependencies": {
     "ethers": "^6.13.4"
+  },
+  "engines": {
+    "node": ">=22.5"
   }
 }

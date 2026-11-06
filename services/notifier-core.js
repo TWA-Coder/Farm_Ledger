@@ -18,7 +18,9 @@ const day = (ts) => new Date(Number(ts) * 1000).toLocaleDateString("en-GB", { da
 const LIVESTOCK = 3;
 const CROP_STATUS = { Approved: 2, Rejected: 3, Superseded: 4 };
 
-function createNotifier({ db = dbm.get(), provider, ledger, cropClaims = null, outbox, onPayout = null, history = process.env.NOTIFY_HISTORY }) {
+const COVER = ["drought", "flood", "crop stress", "cattle"];
+
+function createNotifier({ db = dbm.get(), provider, ledger, cropClaims = null, desk = null, outbox, onPayout = null, history = process.env.NOTIFY_HISTORY }) {
   async function phoneOf(address) {
     const c = contacts.read(db)[String(address).toLowerCase()];
     if (c) return c.phone;
@@ -26,6 +28,8 @@ function createNotifier({ db = dbm.get(), provider, ledger, cropClaims = null, o
     return f.exists ? contacts.phoneForHash(f.phoneHash, db) : null;
   }
   const holderOf = async (policyId) => (await ledger.getPolicy(policyId)).holder;
+  const coverOf = async (productId) => COVER[Number((await ledger.getProduct(productId)).cover)];
+  const masked = async (address) => { const p = await phoneOf(address); return p ? `+${p.slice(0, 5)}...${p.slice(-3)}` : "your farmer"; };
 
   // event -> [{to: address, text}] (and payouts for the Mobile Money bridge)
   async function messagesFor(e) {
@@ -61,6 +65,38 @@ function createNotifier({ db = dbm.get(), provider, ledger, cropClaims = null, o
           : "loss claim approved by the insurer's reviewers";
         return [{ to: a.holder, text: `FarmLedger: ${fmt(a.amount)} RWF paid for policy #${a.policyId} (${why}).`, payout: { amount: a.amount, policyId: a.policyId } }];
       }
+      // ---- PolicyDesk: the application workflow (farmer and agent are both told)
+      case "FarmerAssigned": {
+        const agentPhone = await phoneOf(a.agent);
+        return [
+          { to: a.farmer, text: `FarmLedger: your insurance agent${agentPhone ? ` is on +${agentPhone}` : " has been assigned"}. They will collect your details and apply for cover for you.` },
+          { to: a.agent, text: `FarmLedger: new farmer ${await masked(a.farmer)} assigned to you. Collect their details and submit an application on the portal.` },
+        ];
+      }
+      case "ApplicationSubmitted":
+        return [{ to: a.farmer, text: `FarmLedger: your agent applied for ${await coverOf(a.productId)} cover of ${fmt(a.sumInsured)} RWF (application #${a.applicationId}). The insurer will review it.` }];
+      case "ContractDrafted": {
+        const app = await desk.getApplication(a.applicationId);
+        const subsidy = await ledger.subsidyFor(a.farmer, app.productId, a.premium).catch(() => 0n);
+        const until = day(a.offerExpires);
+        return [
+          { to: a.farmer, text: `FarmLedger: your contract #${a.applicationId} is ready: cover ${fmt(app.sumInsured)} RWF, you pay ${fmt(a.premium - subsidy)} RWF. Dial ${DIAL()}, choose 6 to review and pay by ${until}.` },
+          { to: a.agent, text: `FarmLedger: contract #${a.applicationId} for ${await masked(a.farmer)} is ready (valid to ${until}). Help them review and pay it.` },
+        ];
+      }
+      case "ApplicationRejected":
+        return [
+          { to: a.farmer, text: `FarmLedger: application #${a.applicationId} was not accepted by the insurer. Your agent will explain why and can apply again.` },
+          { to: a.agent, text: `FarmLedger: application #${a.applicationId} for ${await masked(a.farmer)} was rejected. See the reasons on the portal.` },
+        ];
+      case "PolicyIssuedFromApplication": {
+        const app = await desk.getApplication(a.applicationId);
+        return [{ to: app.agent, text: `FarmLedger: ${await masked(a.farmer)} accepted contract #${a.applicationId}; policy #${a.policyId} is issued.` }];
+      }
+      case "OfferDeclined": {
+        const app = await desk.getApplication(a.applicationId);
+        return [{ to: app.agent, text: `FarmLedger: ${await masked(a.farmer)} declined contract #${a.applicationId}.` }];
+      }
       default:
         return [];
     }
@@ -83,7 +119,7 @@ function createNotifier({ db = dbm.get(), provider, ledger, cropClaims = null, o
   }
 
   async function tick() {
-    await indexer.sync({ db, provider, ledger, others: cropClaims ? [cropClaims] : [] });
+    await indexer.sync({ db, provider, ledger, others: [cropClaims, desk].filter(Boolean) });
     let queued = 0, noPhone = 0;
     for (const e of indexer.events(db, { after: cursor() })) {
       const msgs = await messagesFor(e); // chain reads happen before the transaction; a failure retries next tick
@@ -96,9 +132,10 @@ function createNotifier({ db = dbm.get(), provider, ledger, cropClaims = null, o
         resolved.forEach((m, n) => { if (outbox.enqueue({ phone: m.phone, text: m.text, kind: e.name, key: `${e.tx}:${e.idx}:${n}` })) queued++; });
         dbm.setMeta(db, "notifier_cursor", `${e.block}:${e.idx}`);
       });
-      if (onPayout) for (const m of resolved) if (m.payout) await onPayout({ phone: m.phone, ...m.payout, ref: `policy-${m.payout.policyId}-${e.tx.slice(0, 10)}` });
+      if (onPayout) for (const m of resolved) if (m.payout) await onPayout({ phone: m.phone, holder: m.to, ...m.payout, txHash: e.tx });
     }
     const sent = await outbox.drain();
+    if (outbox.refreshStatuses) await outbox.refreshStatuses(); // Intouch has no delivery webhook
     return { queued, sent, noPhone };
   }
 

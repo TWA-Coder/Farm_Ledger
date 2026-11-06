@@ -13,6 +13,8 @@
 // Account services (only when `accounts` is passed, see services/phone-accounts.js)
 //   * Unregistered number: 1. Register (National ID + SMS code, then a PIN) or 2. I changed my number.
 //   * Registered number:   4. Reset PIN (National ID check), and 5. Cancel number change while a move is pending.
+//   * With PolicyDesk: 6. My offers (review a contract drafted by the underwriter; phone accounts pay it by MTN Mobile
+//     Money, services/payments.js) and 7. My agent. Farmers do not book cover themselves: their agent applies.
 //   The farmer's own smart account signs these, inside phone-accounts.js. THIS file still holds no key and the
 //   gateway key below still has CLAIMS_AGENT_ROLE only.
 //
@@ -56,11 +58,17 @@ const FRIENDLY = {
   EnforcedPause: "Service is paused. Try later.",
   AccessControlUnauthorizedAccount: "Service is not set up. Try later.",
   IdAlreadyUsed: "This National ID is already registered.",
+  TagAlreadyRegistered: "This ear tag is already registered.",
+  AssetAlreadyCovered: "This animal already has cover.",
+  InsufficientPool: "The insurer cannot cover that amount now. Try a smaller amount.",
+  ProductInactive: "This cover is not offered at the moment.",
   AlreadyRegistered: "This number is already registered.",
 };
 
 function createUssd(opts) {
-  const { provider, abi, ledgerAddress, cropClaimsAddress = null, agent, accounts = null, db = require("../web/server/db").get() } = opts;
+  const { provider, abi, ledgerAddress, cropClaimsAddress = null, deskAddress = null, agent, accounts = null, payments = null, db = require("../web/server/db").get() } = opts;
+  const deskRO = deskAddress && abi.policyDesk ? new ethers.Contract(deskAddress, abi.policyDesk, provider) : null;
+  const { PROVINCES } = require("../web/shared/districts");
   if (!agent) throw new Error("agent wallet (CLAIMS_AGENT_ROLE) is required");
 
   const sessions = new Map();
@@ -274,7 +282,9 @@ function createUssd(opts) {
   }
 
   // ---------------------------------------------------------------- account services (phone accounts)
-  const codeLimit = (r) => (r.reason === "wait" ? `A code was just sent. Wait ${r.waitS} seconds and dial again.` : "Too many codes today. Try again tomorrow.");
+  const codeLimit = (r) => (r.reason === "wait" ? `A code was just sent. Wait ${r.waitS} seconds and dial again.`
+    : r.reason === "not-sent" ? "We could not send the SMS code to this number right now. Please try again later."
+    : "Too many codes today. Try again tomorrow.");
   const when = (ms) => new Date(ms).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   const ENTER_CODE = "Enter the 6-digit code from the SMS:\n0. Send a new code";
   async function resend(env, purpose) {
@@ -308,11 +318,22 @@ function createUssd(opts) {
     if (nid === undefined) return CON("Enter your 16-digit National ID number:");
     if (!/^\d{16}$/.test(nid)) return END("A National ID has 16 digits. Dial again.");
     if (await idTaken(nid)) return END("This National ID is already registered. If you changed your number, dial again and choose 2.");
+    let district = null; // with PolicyDesk: where the farm is, so the farmer gets the agent covering that district
+    if (deskRO) {
+      const pv = env.next();
+      if (pv === undefined) return list("Province of your farm:", PROVINCES.map((x) => x[0]));
+      const pi = pickIndex(pv, PROVINCES.length); if (pi < 0) return END("Invalid choice.");
+      const ds = PROVINCES[pi][1];
+      const dv = env.next();
+      if (dv === undefined) return list("District:", ds);
+      const di = pickIndex(dv, ds.length); if (di < 0) return END("Invalid choice.");
+      district = ds[di];
+    }
     const ok = env.next();
-    if (ok === undefined) return CON(`Register ID ending ${nid.slice(-4)} with this number?\n1. Yes\n2. No`);
+    if (ok === undefined) return CON(`Register ID ending ${nid.slice(-4)}${district ? `, farm in ${district},` : ""} with this number?\n1. Yes\n2. No`);
     if (ok !== "1") return END("Cancelled.");
     // only the hash of the ID is kept, and only until the code is used
-    const r = await accounts.sendCode(env.phone, "register", { idHash: hashOf(nid) });
+    const r = await accounts.sendCode(env.phone, "register", { idHash: hashOf(nid), district: district && district.toUpperCase() });
     if (!r.ok) return END(codeLimit(r));
     return END("We sent you a 6-digit code by SMS. Dial again within 10 minutes and enter it to finish.");
   }
@@ -326,7 +347,7 @@ function createUssd(opts) {
       if (!r.ok) return END(r.left > 0 ? `Wrong code. ${r.left} tries left. Dial again.` : "That code no longer works. Dial again to start over.");
     }
     const { data } = accounts.verifiedCode(env.phone, "register");
-    await accounts.register(env.phone, data.idHash);
+    await accounts.register(env.phone, data.idHash, data.district || null);
     accounts.clearCode(env.phone, "register");
     consumed();
     return CON("Registered! Your FarmLedger account is ready.\nChoose a 4-digit PIN to protect it:");
@@ -383,6 +404,64 @@ function createUssd(opts) {
     return END("Number change cancelled. Your account stays on this number.");
   }
 
+  // ---------------------------------------------------------------- offers and agent (PolicyDesk)
+  const COVER_NAME = ["Drought", "Flood", "Crop stress", "Cattle death"];
+  const OFFERED = 2;
+
+  // Contracts the underwriter drafted for this farmer that can still be accepted, newest first.
+  async function openOffers(addr) {
+    const evs = await deskRO.queryFilter(deskRO.filters.ContractDrafted(null, addr), 0, "latest");
+    const ids = [...new Set(evs.map((e) => Number(e.args.applicationId)))].reverse();
+    const now = await chainNow();
+    const out = [];
+    for (const id of ids) {
+      const a = await deskRO.getApplication(id);
+      if (Number(a.status) !== OFFERED || Number(a.offerExpires) < now) continue;
+      const prod = await ledgerRO.getProduct(a.productId);
+      out.push({ id, a, cover: Number(prod.cover) });
+    }
+    return out;
+  }
+
+  async function myOffers(env) {
+    const offers = (await openOffers(env.addr)).slice(0, 5);
+    if (!offers.length) return END("You have no contract to review. Your agent applies for cover for you; you will get an SMS when a contract is ready.");
+    const c = env.next();
+    if (c === undefined) return list("Contracts to review:", offers.map((o) => `#${o.id} ${COVER_NAME[o.cover]} ${fmt(o.a.sumInsured)} RWF`));
+    const i = pickIndex(c, offers.length); if (i < 0) return END("Invalid choice.");
+    const o = offers[i];
+    const subsidy = await ledgerRO.subsidyFor(env.addr, o.a.productId, o.a.premium).catch(() => 0n);
+    const pays = o.a.premium - subsidy;
+    const starts = Number(o.a.startAt) ? `from ${date(o.a.startAt)}` : "from payment";
+    const head = `Contract #${o.id}: ${COVER_NAME[o.cover]}, cover ${fmt(o.a.sumInsured)} RWF, ${Number(o.a.coverDays)} days ${starts}.\nPremium ${fmt(o.a.premium)}${subsidy > 0n ? `, subsidy -${fmt(subsidy)}` : ""}. You pay ${fmt(pays)}.\nValid to ${date(o.a.offerExpires)}`;
+    if (!isPhoneAccount(env)) return END(`${head}\nAccept and pay on the FarmLedger website.`);
+    const d = env.next();
+    if (d === undefined) return CON(`${head}\n1. Pay by MoMo\n2. Decline`);
+    if (d === "1") {
+      if (!payments) return END("Payment is not available right now. Try again later.");
+      const pin = await needPin(env); if (pin) return pin;
+      const r = await payments.startPremium({ phone: env.phone, applicationId: o.id });
+      if (r.status === "failed") return END("The Mobile Money payment could not be started. Nothing was charged. Try again later.");
+      return END(`Approve the MoMo payment of ${fmt(r.farmerPays)} RWF on your phone. Your policy is issued once it is paid; we will SMS you.`);
+    }
+    if (d === "2") {
+      const ok = env.next();
+      if (ok === undefined) return CON(`Decline contract #${o.id}? Your agent can apply again later.\n1. Yes, decline\n2. No`);
+      if (ok !== "1") return END("Nothing changed.");
+      const pin = await needPin(env); if (pin) return pin;
+      await accounts.declineOffer(env.phone, o.id);
+      return END(`Contract #${o.id} declined.`);
+    }
+    return END("Invalid choice.");
+  }
+
+  async function myAgent(env) {
+    const agentAddr = await deskRO.agentOf(env.addr);
+    if (agentAddr === ethers.ZeroAddress) return END("No agent is assigned to you yet. FarmLedger will SMS you when one is.");
+    const c = db.prepare("SELECT phone FROM contacts WHERE lower(address) = lower(?)").get(agentAddr);
+    return END(`Your FarmLedger agent${c ? ` can be reached on +${c.phone}` : " has no phone number on file yet"}. They collect your details and apply for cover for you.`);
+  }
+
   // ---------------------------------------------------------------- PIN setup (first call only)
   function pinSetup(env) {
     const p1 = env.next();
@@ -409,9 +488,11 @@ function createUssd(opts) {
   }
 
   const MENU = "FarmLedger\n1. My policies\n2. Report a claim\n3. Claim status";
+  // Paying and declining need the farmer's own key, which the server holds only for phone accounts.
+  const isPhoneAccount = (env) => Boolean(accounts && accounts.accountOf(env.phone)?.status === "active");
   const menuFor = (env) => (accounts
-    ? MENU + "\n4. Reset PIN" + (accounts.moveFrom(env.phone) ? "\n5. Cancel number change" : "")
-    : MENU);
+    ? MENU + "\n4. Reset PIN" + (accounts.moveFrom(env.phone) ? "\n5. Cancel number change" : "") + (deskRO ? "\n6. My offers\n7. My agent" : "")
+    : MENU + (deskRO ? "\n6. My offers\n7. My agent" : ""));
 
   async function route(env, consumed) {
     const addr = await farmerByPhone(env.phone);
@@ -431,6 +512,8 @@ function createUssd(opts) {
       case "3": return claimStatus(env);
       case "4": if (accounts) return resetPin(env); break;
       case "5": { const mv = accounts && accounts.moveFrom(env.phone); if (mv) return cancelMove(env, mv); break; }
+      case "6": if (deskRO) return myOffers(env); break;
+      case "7": if (deskRO) return myAgent(env); break;
     }
     return END("Invalid choice.");
   }

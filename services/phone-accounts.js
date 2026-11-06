@@ -1,6 +1,9 @@
 // Phone accounts: a FarmLedger smart account for a farmer who only has a basic phone (USSD + SMS).
 //
 // Custody model (decision 1A, "backend signer"). This is the ONLY module that holds farmer keys.
+//   * Keys can live in a separate process: with `custody` ({url, token}, services/custody.js) this module never sees
+//     PHONE_KEY_SECRET and asks the custody service to create keys and sign; without it (tests, a standalone
+//     `npm run ussd`) it does both in-process.
 //   * One ERC-4337 smart account per phone number. Its owner key is generated here and stored ENCRYPTED
 //     (AES-256-GCM, key derived from PHONE_KEY_SECRET with HKDF). It is decrypted only in memory to sign a
 //     UserOperation and is never returned, logged or sent anywhere. Fees are paid by the FarmLedger paymaster.
@@ -57,14 +60,15 @@ function loadSecret({ local }) {
 
 function createPhoneAccounts(opts) {
   const {
-    db = dbm.get(), provider, aa, ledgerAddress, abi, secret, sendSms,
-    transport = null, now = () => Date.now(),
+    db = dbm.get(), provider, aa, ledgerAddress, deskAddress = null, abi, secret = null, sendSms,
+    transport = null, now = () => Date.now(), custody = null, codeSecret = null,
     recoveryDelayMs = Number(process.env.RECOVERY_DELAY_HOURS ?? 48) * 3600 * 1000,
   } = opts;
-  if (!secret || secret.length !== 32) throw new Error("phone accounts need a 32-byte secret");
+  if (!custody && (!secret || secret.length !== 32)) throw new Error("phone accounts need a 32-byte secret (or a custody service)");
   if (!aa) throw new Error("phone accounts need the smart-account contracts (deployment aa)");
-  const wrapKey = Buffer.from(crypto.hkdfSync("sha256", secret, Buffer.alloc(0), "farmledger/phone-key/v1", 32));
-  const codeKey = Buffer.from(crypto.hkdfSync("sha256", secret, Buffer.alloc(0), "farmledger/otp/v1", 32));
+  const wrapKey = secret ? Buffer.from(crypto.hkdfSync("sha256", secret, Buffer.alloc(0), "farmledger/phone-key/v1", 32)) : null;
+  // one-time codes are hashed with a key of their own; with a custody service the key secret is not available here
+  const codeKey = Buffer.from(crypto.hkdfSync("sha256", secret || codeSecret || Buffer.from(String(custody?.token || "")), Buffer.alloc(0), "farmledger/otp/v1", 32));
   const decoders = [new ethers.Interface(abi.ledger), ...(abi.token ? [new ethers.Interface(abi.token)] : [])];
   const ledgerRO = new ethers.Contract(ledgerAddress, abi.ledger, provider);
 
@@ -88,14 +92,50 @@ function createPhoneAccounts(opts) {
   const rowOf = (phone) => db.prepare("SELECT * FROM phone_accounts WHERE phone = ?").get(phone) || null;
   const signerOf = (row) => new SmartAccountSigner(new ethers.Wallet(unseal(row)), provider, aa, decoders, 0n, transport);
 
+  // ---------------------------------------------------------------- keyring: in-process, or the custody service
+  async function custodyCall(path, body) {
+    let res;
+    try {
+      res = await fetch(custody.url.replace(/\/+$/, "") + path, { method: "POST", headers: { "Content-Type": "application/json", "X-Custody-Token": custody.token }, body: JSON.stringify(body) });
+    } catch { throw new Error("The key custody service is not reachable. Start it with npm run phone (or npm run custody)."); }
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { const err = new Error(j.error || `custody HTTP ${res.status}`); if (j.revert) err.revert = j.revert; throw err; }
+    return j;
+  }
+  const keyring = custody ? {
+    createKey: (phone) => custodyCall("/keys", { phone }),
+    sendCalls: async (phone, calls) => { const { hash } = await custodyCall("/calls", { phone, calls }); return { hash, wait: async () => (await provider.getTransaction(hash)).wait() }; },
+  } : {
+    async createKey(phone) {
+      if (rowOf(phone)) return { account: rowOf(phone).account };
+      const owner = ethers.Wallet.createRandom();
+      const account = await new SmartAccountSigner(owner, provider, aa, decoders, 0n, transport).getAddress();
+      db.prepare("INSERT INTO phone_accounts (phone, account, owner, enc_key, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)")
+        .run(phone, account, owner.address, seal(owner.privateKey, account), new Date(now()).toISOString());
+      return { account };
+    },
+    sendCalls: (phone, calls) => {
+      const r = rowOf(phone);
+      if (!r) throw new Error("No phone account for this number.");
+      return signerOf(r).sendCalls(calls);
+    },
+  };
+
+  // Calls from an ACTIVE account (the caller checked the PIN): payments, declining an offer. -> transaction (.wait())
+  function sendCalls(phone, calls) {
+    const r = rowOf(phone);
+    if (!r || r.status !== "active") throw new Error("No active phone account for this number.");
+    return keyring.sendCalls(phone, calls);
+  }
+
   function accountOf(phone) {
     const r = rowOf(phone);
     return r ? { phone: r.phone, account: r.account, owner: r.owner, status: r.status, createdAt: r.created_at } : null;
   }
 
-  // For later phases (buying cover by USSD, paying premiums): a signer for an ACTIVE account. The caller must have
-  // checked the PIN. The signer never exposes the key (owner is an ethers.Wallet kept inside it).
+  // In-process mode only (tests, tools): an ethers signer for an ACTIVE account. It never exposes the key.
   function signerFor(phone) {
+    if (custody) throw new Error("Keys are held by the custody service: use sendCalls.");
     const r = rowOf(phone);
     if (!r || r.status !== "active") throw new Error("No active phone account for this number.");
     return signerOf(r);
@@ -121,7 +161,13 @@ function createPhoneAccounts(opts) {
       ON CONFLICT(phone, purpose) DO UPDATE SET code_hash = excluded.code_hash, data = excluded.data, expires_at = excluded.expires_at,
       tries = 0, sent_at = excluded.sent_at, sends = excluded.sends, window_start = excluded.window_start, verified = 0`)
       .run(phone, purpose, codeHash(phone, purpose, code), JSON.stringify(data ?? null), t + CODE_TTL_MS, t, sends + 1, windowStart);
-    await sendSms(phone, text(code), { kind: "otp", secret: code }); // the outbox stores the text with the code masked
+    const sent = await sendSms(phone, text(code), { kind: "otp", secret: code }); // the outbox stores the text with the code masked
+    if (sent && sent.ok === false) {
+      // nothing reached the phone (skipped by the allowlist, refused by the provider...): void the code so the menu does
+      // not ask for it, but keep the row so the resend limits still count
+      db.prepare("UPDATE otp_codes SET expires_at = 0, sent_at = 0 WHERE phone = ? AND purpose = ?").run(phone, purpose);
+      return { ok: false, reason: "not-sent", detail: sent.skipped ? "skipped" : sent.error || "failed" };
+    }
     return { ok: true, expiresAt: t + CODE_TTL_MS };
   }
 
@@ -161,23 +207,19 @@ function createPhoneAccounts(opts) {
 
   // ---------------------------------------------------------------- registration
   // Creates (or resumes) the phone's account and registers the farmer on-chain from it. idHash = keccak256(National ID),
-  // the same hash the portal uses. Safe to call again after a crash: a "pending" row reuses its key.
-  async function register(phone, idHash) {
+  // the same hash the portal uses. With PolicyDesk deployed the same operation joins the farm's district, which assigns
+  // the farmer's insurance agent. Safe to call again after a crash: a "pending" row reuses its key.
+  async function register(phone, idHash, district = null) {
     let r = rowOf(phone);
-    if (r && r.status === "active") throw new Error("This number already has an account.");
-    if (!r) {
-      const owner = ethers.Wallet.createRandom();
-      const signer = new SmartAccountSigner(owner, provider, aa, decoders, 0n, transport);
-      const account = await signer.getAddress();
-      db.prepare("INSERT INTO phone_accounts (phone, account, owner, enc_key, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)")
-        .run(phone, account, owner.address, seal(owner.privateKey, account), new Date(now()).toISOString());
-      r = rowOf(phone);
-    }
+    // an "active" row whose farmer is not on-chain belongs to a chain that was reset: register the same account again
+    if (r && r.status === "active" && (await ledgerRO.getFarmer(r.account)).exists) throw new Error("This number already has an account.");
+    if (!r) { await keyring.createKey(phone); r = rowOf(phone); }
     let tx = null;
     if (!(await ledgerRO.getFarmer(r.account)).exists) {
-      const ledger = new ethers.Contract(ledgerAddress, abi.ledger, signerOf(r));
+      const calls = [{ to: ledgerAddress, data: ledgerRO.interface.encodeFunctionData("registerFarmer", [idHash, hashOf(phone)]) }];
+      if (deskAddress && district) calls.push({ to: deskAddress, data: new ethers.Interface(abi.policyDesk).encodeFunctionData("join", [ethers.encodeBytes32String(district)]) });
       try {
-        tx = (await (await ledger.registerFarmer(idHash, hashOf(phone))).wait()).hash;
+        tx = (await (await keyring.sendCalls(phone, calls)).wait()).hash;
       } catch (e) {
         // nothing happened on-chain: forget the key so a later attempt starts clean
         db.prepare("DELETE FROM phone_accounts WHERE phone = ? AND status = 'pending'").run(phone);
@@ -247,9 +289,7 @@ function createPhoneAccounts(opts) {
     const q = reqRow(id);
     if (!q || q.status !== "waiting") throw new Error("No waiting number change with that id.");
     if (now() < q.ready_at) throw new Error("The waiting period for this number change has not ended.");
-    const r = rowOf(q.old_phone);
-    const ledger = new ethers.Contract(ledgerAddress, abi.ledger, signerOf(r));
-    await (await ledger.updatePhone(hashOf(q.new_phone))).wait();
+    await (await keyring.sendCalls(q.old_phone, [{ to: ledgerAddress, data: ledgerRO.interface.encodeFunctionData("updatePhone", [hashOf(q.new_phone)]) }])).wait();
     dbm.tx(db, () => {
       db.prepare("UPDATE phone_accounts SET phone = ? WHERE phone = ?").run(q.new_phone, q.old_phone);
       db.prepare("DELETE FROM ussd_users WHERE phone IN (?, ?)").run(q.old_phone, q.new_phone); // fresh PIN on the new number
@@ -260,12 +300,21 @@ function createPhoneAccounts(opts) {
     return reqRow(id);
   }
 
+  // ---------------------------------------------------------------- offers (USSD "My offers")
+  // Declining a drafted contract, signed by the farmer's own account after the menu checked the PIN. (Accepting goes
+  // through payments.js, because it needs the premium first.)
+  async function declineOffer(phone, applicationId) {
+    if (!deskAddress) throw new Error("PolicyDesk is not deployed.");
+    await (await sendCalls(phone, [{ to: deskAddress, data: new ethers.Interface(abi.policyDesk).encodeFunctionData("declineOffer", [applicationId]) }])).wait();
+  }
+
   const requests = (status = null) => (status
     ? db.prepare("SELECT * FROM recovery_requests WHERE status = ? ORDER BY id").all(status)
     : db.prepare("SELECT * FROM recovery_requests ORDER BY id").all());
 
   return {
-    accountOf, signerFor, register, notify: sendSms,
+    accountOf, signerFor, sendCalls, register, declineOffer, notify: sendSms,
+    keyring: custody ? null : keyring, // the custody service uses the in-process keyring directly
     sendCode, resendCode, pendingCode, verifiedCode, checkCode, clearCode,
     startMove, confirmMove, cancelMove, releaseNow, completeMove, moveTo, moveFrom, requests,
     recoveryDelayMs, now,

@@ -22,6 +22,8 @@ const { ethers } = require("ethers");
 const { loadDeployment, loadAbi } = require("./common");
 const { createUssd } = require("./ussd-core");
 const { createHandler } = require("./ussd-http");
+const { createSmsChannel } = require("./sms-channel");
+const { paymentsFromEnv } = require("./payments");
 const { createPhoneAccounts, loadSecret } = require("./phone-accounts");
 const { createOutbox } = require("./sms");
 
@@ -38,17 +40,23 @@ const agent = new ethers.Wallet(agentKey, provider);
 const outbox = createOutbox({ localChain: local });
 const sendSms = (phone, text, opts) => outbox.sendNow(phone, text, opts);
 const accounts = dep.aa && process.env.PHONE_ACCOUNTS !== "off"
-  ? createPhoneAccounts({ provider, aa: dep.aa, ledgerAddress: dep.ledger, abi: loadAbi(), secret: loadSecret({ local }), sendSms })
+  ? createPhoneAccounts({ provider, aa: dep.aa, ledgerAddress: dep.ledger, deskAddress: dep.policyDesk, abi: loadAbi(), sendSms,
+    ...(process.env.CUSTODY_URL ? { custody: { url: process.env.CUSTODY_URL, token: process.env.CUSTODY_TOKEN } } : { secret: loadSecret({ local }) }) })
   : null;
 const TOKEN = process.env.CALLBACK_TOKEN || "";
+
+// Buying cover from a basic phone: premiums collected by MTN Mobile Money (or the simulator), see payments.js.
+const payments = accounts ? paymentsFromEnv({ provider, dep, abi: loadAbi(), accounts, outbox }) : null;
 
 const ussd = createUssd({
   provider,
   abi: loadAbi(),
   ledgerAddress: dep.ledger,
   cropClaimsAddress: dep.cropClaims || null,
+  deskAddress: dep.policyDesk || null,
   agent,
   accounts,
+  payments,
 });
 
 (async () => {
@@ -61,7 +69,9 @@ const ussd = createUssd({
   } catch (e) { console.warn("[ussd] startup check skipped:", e.shortMessage || e.message); }
 })();
 
-const server = http.createServer(createHandler({ ussd, outbox, token: TOKEN }));
+// Farmers can also use the same menus by SMS, through an Android phone running SMS Gateway for Android.
+const smsChannel = createSmsChannel({ ussd, outbox });
+const server = http.createServer(createHandler({ ussd, outbox, smsChannel, token: TOKEN }));
 
 const port = Number(process.env.USSD_PORT || 4000);
 server.on("error", (e) => {
@@ -71,8 +81,13 @@ server.on("error", (e) => {
 });
 server.listen(port, () => {
   console.log(`USSD service on http://localhost:${port}/ussd  (demo farmers: 250788000001 Aline, 250788000002 Jean)`);
-  console.log(`  SMS: ${outbox.mode}${process.env.SMS_ALLOWLIST ? ` (allowlist ${process.env.SMS_ALLOWLIST})` : ""} · internet callbacks: ${TOKEN ? "need ?key=CALLBACK_TOKEN" : "REFUSED (set CALLBACK_TOKEN to accept them)"}`);
+  console.log(`  SMS: ${outbox.describe} · internet callbacks: ${TOKEN ? "need ?key=CALLBACK_TOKEN" : "REFUSED (set CALLBACK_TOKEN to accept them)"}`);
+  console.log(outbox.gatewayReady
+    ? `  SMS menu channel ON: Android gateway webhook at /sms/gateway${smsChannel.signed ? " (signature checked)" : " - WARNING: set SMSGATE_SIGNING_KEY so webhooks are verified"}`
+    : "  SMS menu channel: set SMSGATE_URL / SMSGATE_USER / SMSGATE_PASSWORD to let farmers use the menus by SMS");
+  if (accounts) console.log(process.env.CUSTODY_URL ? "  farmer keys: held by the custody service (this process cannot read them)" : "  farmer keys: IN THIS PROCESS (start with npm run phone to keep them in the custody service)");
+  if (payments) console.log(`  Contracts paid by USSD (6. My offers): premiums by ${payments.mode}`);
   console.log(accounts
-    ? `  phone accounts ON: new numbers can register; number changes wait ${accounts.recoveryDelayMs / 3600000} h. SMS codes appear in this log${process.env.AT_API_KEY ? " and are sent by Africa's Talking" : ""}.`
+    ? `  phone accounts ON: new numbers can register; number changes wait ${accounts.recoveryDelayMs / 3600000} h. SMS codes are ${outbox.mode === "log" ? "only written to services/out/sms.log" : `sent by ${outbox.mode}`}.`
     : "  phone accounts OFF (no smart-account contracts, or PHONE_ACCOUNTS=off): monitoring and claims only.");
 });

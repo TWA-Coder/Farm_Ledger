@@ -1,13 +1,18 @@
 // Operator tool for phone accounts (services/phone-accounts.js). Never prints keys.
 //   npm run accounts                    list phone accounts and number-change requests
-//   npm run accounts -- cancel <id>     cancel a waiting number change (e.g. the farmer called to report fraud)
-//   npm run accounts -- release <id>    end the waiting period now (after checking the farmer's ID in person);
-//                                       the move completes the next time the farmer dials from the new number
+//   npm run accounts -- cancel <id> --by <name>
+//        cancel a waiting number change (e.g. the farmer called to report fraud)
+//   npm run accounts -- release <id> --agent <agent address> --by <name>
+//        end the waiting period now. Only after the farmer's OWN insurance agent checked their National ID in person:
+//        the agent named must be the one assigned to the farmer on-chain. The move completes when the farmer next dials.
+//   npm run accounts -- log             the operator log
+// Changing commands are recorded with the operator's name (services/operator-log.js).
 const { ethers } = require("ethers");
 const { loadDeployment, loadAbi } = require("./common");
 const { createPhoneAccounts, loadSecret } = require("./phone-accounts");
 const { sendSms } = require("./sms");
 const dbm = require("../web/server/db");
+const oplog = require("./operator-log");
 
 async function main() {
   const [cmd = "list", arg] = process.argv.slice(2);
@@ -28,11 +33,27 @@ async function main() {
     console.log(`Number changes (${reqs.length})`);
     for (const q of reqs) console.log(`  #${q.id}  +${q.old_phone} -> +${q.new_phone}  ${q.status}  ready ${time(q.ready_at)}${q.note ? `  (${q.note})` : ""}`);
   } else if (cmd === "cancel") {
-    console.log((await accounts.cancelMove(Number(arg), "operator")) ? `Request #${arg} cancelled.` : `No waiting request #${arg}.`);
+    const by = oplog.operatorFrom(process.argv);
+    const ok = await accounts.cancelMove(Number(arg), `operator ${by}`);
+    if (ok) oplog.record({ operator: by, command: "accounts cancel", target: `move #${arg}` });
+    console.log(ok ? `Request #${arg} cancelled.` : `No waiting request #${arg}.`);
   } else if (cmd === "release") {
-    console.log(accounts.releaseNow(Number(arg)) ? `Request #${arg} released. It completes when the farmer dials from the new number.` : `No waiting request #${arg}.`);
+    const by = oplog.operatorFrom(process.argv);
+    const agent = oplog.flag(process.argv, "--agent");
+    const q = accounts.requests("waiting").find((r) => r.id === Number(arg));
+    if (!q) { console.log(`No waiting request #${arg}.`); return; }
+    if (!agent || !ethers.isAddress(agent)) throw new Error("Name the farmer's agent who checked the ID in person: --agent <address>.");
+    if (!dep.policyDesk) throw new Error("PolicyDesk is not deployed: there is no agent to confirm the farmer's identity.");
+    const desk = new ethers.Contract(dep.policyDesk, loadAbi().policyDesk, provider);
+    const assigned = await desk.agentOf(q.account);
+    if (assigned.toLowerCase() !== agent.toLowerCase()) throw new Error(`That is not this farmer's agent (on-chain: ${assigned}). Nothing was released.`);
+    accounts.releaseNow(q.id);
+    oplog.record({ operator: by, command: "accounts release", target: `move #${q.id}`, detail: `ID checked by agent ${agent}` });
+    console.log(`Request #${q.id} released (ID checked by agent ${agent}). It completes when the farmer dials from the new number.`);
+  } else if (cmd === "log") {
+    for (const r of oplog.recent()) console.log(`  ${r.at}  ${r.operator}  ${r.command}  ${r.target}${r.detail ? `  (${r.detail})` : ""}`);
   } else {
-    console.log("Usage: npm run accounts [-- list | cancel <id> | release <id>]");
+    console.log("Usage: npm run accounts [-- list | log | cancel <id> --by <name> | release <id> --agent <address> --by <name>]");
     process.exitCode = 1;
   }
 }

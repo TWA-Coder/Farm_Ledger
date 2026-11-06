@@ -10,6 +10,8 @@
 //   otp_codes       one-time SMS codes (hashed), per phone and purpose
 //   recovery_requests  moving a phone account to a new number (waiting period, cancellable from the old number)
 //   sms_outbox  every SMS: queued -> sent -> delivered/undeliverable, with retries and provider ids (services/sms.js)
+//   momo_payments  MTN MoMo premium collections, payouts and refunds, step by step (services/payments.js)
+//   sms_inbound / sms_sessions  SMS received by the Android gateway phone, and each phone's menu conversation
 //
 // Location: $FARMLEDGER_DB, else web/.data/farmledger.db (git-ignored). WAL mode lets the portal and the services
 // read and write the same file at the same time.
@@ -42,6 +44,17 @@ CREATE TABLE IF NOT EXISTS sms_outbox (
   cost TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS sms_outbox_due ON sms_outbox (status, next_at);
 CREATE INDEX IF NOT EXISTS sms_outbox_provider ON sms_outbox (provider_id);
+CREATE TABLE IF NOT EXISTS sms_inbound (
+  id TEXT PRIMARY KEY, phone TEXT NOT NULL, text TEXT NOT NULL, received_at INTEGER NOT NULL, reply TEXT);
+CREATE TABLE IF NOT EXISTS sms_sessions (
+  phone TEXT PRIMARY KEY, session_id TEXT NOT NULL, inputs TEXT NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS momo_payments (
+  ref TEXT PRIMARY KEY, kind TEXT NOT NULL, phone TEXT NOT NULL, account TEXT NOT NULL, amount INTEGER NOT NULL,
+  currency TEXT NOT NULL, external_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, intent TEXT, policy_id INTEGER,
+  reason TEXT, financial_tx TEXT, parent TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS momo_payments_status ON momo_payments (status, updated_at);
+CREATE TABLE IF NOT EXISTS momo_sim (
+  ref TEXT PRIMARY KEY, kind TEXT NOT NULL, phone TEXT NOT NULL, amount TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS recovery_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT, old_phone TEXT NOT NULL, new_phone TEXT NOT NULL, account TEXT NOT NULL,
   status TEXT NOT NULL, created_at INTEGER NOT NULL, ready_at INTEGER, done_at INTEGER, note TEXT);
@@ -67,9 +80,16 @@ function open(file = defaultFile()) {
   const db = new DatabaseSync(file);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
   db.exec(SCHEMA);
+  upgrade(db);
   if (file !== ":memory:") { try { fs.chmodSync(file, 0o600); } catch { /* not fatal */ } } // phone numbers: owner only
   if (file === defaultFile()) migrateJsonFiles(db); // tests open their own files and never import real data
   return db;
+}
+
+// Columns added after a table first shipped (CREATE TABLE IF NOT EXISTS does not add them to an existing file).
+function upgrade(db) {
+  const has = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+  if (!has("sms_outbox", "via")) db.exec("ALTER TABLE sms_outbox ADD COLUMN via TEXT"); // provider that sends it
 }
 
 let shared = null;

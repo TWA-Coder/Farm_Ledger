@@ -155,6 +155,16 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
       expect(await dial(NEW, [lastCode(NEW), PIN, PIN])).to.match(/^CON PIN saved/); // the last code still works
     });
 
+    it("says so when the code SMS could not be sent (e.g. number not allowlisted), and asks for no code", async () => {
+      accounts = createPhoneAccounts({
+        db, provider: ethers.provider, aa: ctx.aa, ledgerAddress: ctx.ledgerAddr, abi, secret,
+        sendSms: async () => ({ ok: false, skipped: true }), transport: transport(ctx.entryPoint, ctx.relayer), now: () => clock,
+      });
+      u = createUssd({ provider: ethers.provider, abi, ledgerAddress: ctx.ledgerAddr, agent: ctx.agent, accounts, db });
+      expect(await dial(NEW, ["1", NID, "1"])).to.equal("END We could not send the SMS code to this number right now. Please try again later.");
+      expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number");
+    });
+
     it("a registration that fails on-chain leaves no key behind", async () => {
       await expect(accounts.register(NEW, hash("1199080012345678"))).to.be.rejected; // Aline's ID: IdAlreadyUsed
       expect(accounts.accountOf(NEW)).to.equal(null);

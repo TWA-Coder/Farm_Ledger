@@ -1,43 +1,45 @@
 // Notification + Mobile Money bridge (FR-11): texts farmers about every step of their cover, in chain order, and
 // sends a Mobile Money disbursement for every payout. Logic: services/notifier-core.js; SMS: services/sms.js.
 //
-//   node services/notifier.js     (env: NOTIFIER_INTERVAL_MS 3000, NOTIFY_HISTORY=all, AT_* and SMS_ALLOWLIST, see sms.js)
+//   node services/notifier.js     (env: NOTIFIER_INTERVAL_MS 3000, NOTIFY_HISTORY=all, SMS settings in sms.js, MOMO_* in momo.js)
 //
-// MoMo: stub - records the disbursement in services/out/momo-ledger.json (idempotent per payout reference).
-//       Phase 6 replaces disburseMomo() with the MTN MoMo Disbursements sandbox.
-const fs = require("fs");
-const path = require("path");
+// Mobile Money (services/payments.js): payouts to phone-account farmers are sent to their MTN MoMo number, and
+// premiums started from USSD are completed here. Simulated unless MTN MoMo credentials are set (see README).
 const { ethers } = require("ethers");
 const { connect, loadAbi } = require("./common");
 const { createOutbox } = require("./sms");
 const { createNotifier } = require("./notifier-core");
-
-const OUT = path.join(__dirname, "out");
-fs.mkdirSync(OUT, { recursive: true });
-const MOMO_LEDGER = path.join(OUT, "momo-ledger.json");
-
-async function disburseMomo({ phone, amount, ref }) {
-  const ledger = fs.existsSync(MOMO_LEDGER) ? JSON.parse(fs.readFileSync(MOMO_LEDGER, "utf8")) : [];
-  // Idempotency: the reference is unique per payout, so a payout is never disbursed twice (also across restarts).
-  if (ledger.some((e) => e.reference === ref)) return console.log(`  MoMo: ${ref} already disbursed, skipping`);
-  ledger.push({ at: new Date().toISOString(), msisdn: phone, amountRWF: Number(amount), reference: ref, status: "SIMULATED_SUCCESS" });
-  fs.writeFileSync(MOMO_LEDGER, JSON.stringify(ledger, null, 2));
-  console.log(`  MoMo (simulated): ${amount} RWF -> +${phone}  ref ${ref}`);
-}
+const { createPhoneAccounts, loadSecret } = require("./phone-accounts");
+const { paymentsFromEnv } = require("./payments");
 
 async function main() {
   const { dep, ledger, provider } = connect("notifier", "NOTIFIER_PRIVATE_KEY");
   const abi = loadAbi();
   const cropClaims = dep.cropClaims && abi.cropClaims ? new ethers.Contract(dep.cropClaims, abi.cropClaims, provider) : null;
-  const outbox = createOutbox({ localChain: ["localhost", "hardhat"].includes(dep.network) });
-  const notifier = createNotifier({ provider, ledger, cropClaims, outbox, onPayout: disburseMomo });
-  console.log(`Notifier on ${dep.ledger}${cropClaims ? ` + CropClaims ${dep.cropClaims}` : ""} · SMS: ${outbox.mode}${process.env.SMS_ALLOWLIST ? ` (allowlist ${process.env.SMS_ALLOWLIST})` : ""}`);
+  const desk = dep.policyDesk && abi.policyDesk ? new ethers.Contract(dep.policyDesk, abi.policyDesk, provider) : null;
+  const local = ["localhost", "hardhat"].includes(dep.network);
+  const outbox = createOutbox({ localChain: local });
+  // Payments need the phone accounts (their keys sign the purchase and the payout sweep).
+  const accounts = dep.aa && process.env.PHONE_ACCOUNTS !== "off"
+    ? createPhoneAccounts({ provider, aa: dep.aa, ledgerAddress: dep.ledger, deskAddress: dep.policyDesk, abi, sendSms: (p, t, o) => outbox.sendNow(p, t, o),
+      ...(process.env.CUSTODY_URL ? { custody: { url: process.env.CUSTODY_URL, token: process.env.CUSTODY_TOKEN } } : { secret: loadSecret({ local }) }) })
+    : null;
+  const payments = accounts ? paymentsFromEnv({ provider, dep, abi, accounts, outbox }) : null;
+  const onPayout = async ({ holder, amount, policyId, txHash, phone }) => {
+    const ref = payments && payments.startPayout({ holder, amount, policyId, txHash });
+    console.log(ref ? `  MoMo payout ${ref.slice(0, 8)}: ${amount} RWF -> +${phone} (policy #${policyId})`
+      : `  payout for policy #${policyId} stays in the farmer's own wallet (not a phone account)`);
+  };
+  const notifier = createNotifier({ provider, ledger, cropClaims, desk, outbox, onPayout });
+  if (payments) console.log(`Mobile Money: ${payments.mode}`);
+  console.log(`Notifier on ${dep.ledger}${cropClaims ? ` + CropClaims ${dep.cropClaims}` : ""} · SMS: ${outbox.describe}`);
 
   const every = Number(process.env.NOTIFIER_INTERVAL_MS || 3000);
   let failing = false;
   for (;;) {
     try {
       const r = await notifier.tick();
+      if (payments) { const moved = await payments.tick(); if (moved) console.log(`${new Date().toISOString()}  ${moved} Mobile Money payment step(s) done`); }
       if (r.queued || r.noPhone) console.log(`${new Date().toISOString()}  queued ${r.queued} SMS${r.noPhone ? `, ${r.noPhone} without a phone number on file` : ""}`);
       if (failing) { console.log("chain reachable again"); failing = false; }
     } catch (e) {

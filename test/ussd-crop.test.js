@@ -2,7 +2,7 @@
 // The gateway still makes one kind of call only: fileClaimFor (on FarmLedger for cattle, on CropClaims for crops).
 const { expect } = require("chai");
 const { artifacts } = require("hardhat");
-const { ethers, loadFixture, time, farmerFixture } = require("./helpers");
+const { ethers, loadFixture, time, farmerFixture, buyFor } = require("./helpers");
 const { createUssd } = require("../services/ussd-core");
 const dbm = require("../web/server/db");
 
@@ -41,8 +41,8 @@ describe("USSD crop loss claims", function () {
   }
 
   it("lists crop and cattle cover, files a crop loss claim for the holder through the agent, and shows its review", async () => {
-    await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000); // 1 drought
-    await ctx.ledger.connect(ctx.farmer).buyPolicy(4, 1, 300_000); // 2 cattle
+    await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000); // 1 drought
+    await buyFor(ctx.ledger, ctx.farmer, 4, 1, 300_000); // 2 cattle
     const menu = await dial(["2"]);
     expect(menu).to.match(/^CON Claim on which cover\?\n1\. RW-TAG-0001 \(policy #2\)\n2\. MAIZE 5,000m2 \(policy #1\)$/);
     expect(await dial(["2", "2"])).to.match(/^CON Report a crop loss on MAIZE 5,000m2 \(policy #1\)\?/);
@@ -61,17 +61,17 @@ describe("USSD crop loss claims", function () {
   });
 
   it("needs the PIN, and cattle claims still follow the waiting period", async () => {
-    await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000);
+    await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
     expect(await dial(["2", "1", "1", "0000"])).to.equal("END Wrong PIN.");
     expect(await claims.claimCount()).to.equal(0n);
-    await ctx.ledger.connect(ctx.farmer).buyPolicy(4, 1, 300_000);
+    await buyFor(ctx.ledger, ctx.farmer, 4, 1, 300_000);
     expect(await dial(["2", "1"])).to.match(/^END Claims for this policy open on/);
     await time.increase(8 * DAY);
     expect(await dial(["2", "1", "1", PIN])).to.match(/^END Claim #1 registered\. A vet will verify it/);
   });
 
   it("every screen fits the 182-character USSD limit", async () => {
-    await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000);
+    await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
     const seen = [];
     for (const a of [["2"], ["2", "1"], ["2", "1", "1"], ["2", "1", "1", PIN], ["3"], ["3", "1"]]) seen.push(await dial(a));
     for (const s of seen) expect(s.length, s).to.be.at.most(182);

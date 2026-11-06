@@ -3,7 +3,7 @@
 const { expect } = require("chai");
 const http = require("http");
 const { Readable } = require("stream");
-const { ethers, loadFixture, time, hash, Metric, farmerFixture, signAttestation } = require("./helpers");
+const { ethers, loadFixture, time, hash, Metric, farmerFixture, signAttestation, buyFor } = require("./helpers");
 const dbm = require("../web/server/db");
 const contacts = require("../web/server/contacts");
 const { createOutbox, BACKOFF_MS } = require("../services/sms");
@@ -42,7 +42,7 @@ describe("Notifications (SMS outbox + notifier)", function () {
 
   describe("notifier", function () {
     it("texts in chain order: welcome, purchase, then payout, even when they happen back to back", async () => {
-      await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000);
+      await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
       await ctx.ledger.connect(ctx.oracle).postReading(1, Metric.Rainfall, 900, await time.latest());
       const r = await notifier.tick();
       expect(r.queued).to.equal(4); // 2 welcomes (fixture), purchase, payout
@@ -54,7 +54,7 @@ describe("Notifications (SMS outbox + notifier)", function () {
     });
 
     it("never sends a message twice: not on the next tick, not after a restart", async () => {
-      await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000);
+      await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
       await notifier.tick();
       const n = sent.length;
       expect((await notifier.tick()).queued).to.equal(0);
@@ -64,7 +64,7 @@ describe("Notifications (SMS outbox + notifier)", function () {
     });
 
     it("on its very first start skips the history, then texts only what happens next", async () => {
-      await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000);
+      await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
       build({ history: null }); // as without NOTIFY_HISTORY
       expect((await notifier.tick()).queued).to.equal(0);
       await ctx.ledger.connect(ctx.oracle).postReading(1, Metric.Rainfall, 900, await time.latest());
@@ -74,12 +74,12 @@ describe("Notifications (SMS outbox + notifier)", function () {
 
     it("after a chain reset it starts again from the new chain's first event", async () => {
       const snap = await ethers.provider.send("evm_snapshot", []);
-      await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000);
-      await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000);
+      await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
+      await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
       await notifier.tick();
       await ethers.provider.send("evm_revert", [snap]); // same addresses, new blocks
       await ctx.ledger.connect(ctx.farmer2).registerPlot(-1_300_000, 30_300_000, 8000, ethers.encodeBytes32String("BEANS"), hash("g"));
-      await ctx.ledger.connect(ctx.farmer2).buyPolicy(1, 2, 50_000);
+      await buyFor(ctx.ledger, ctx.farmer2, 1, 2, 50_000);
       sent = [];
       await notifier.tick();
       expect(sent.map((m) => m.phone)).to.include(JEAN);
@@ -88,8 +88,8 @@ describe("Notifications (SMS outbox + notifier)", function () {
 
     it("covers claims: livestock filed and rejected, crop loss filed and rejected, expiry", async () => {
       const { ledger, claims, farmer, underwriter, vet } = ctx;
-      await ledger.connect(farmer).buyPolicy(4, 1, 300_000); // 1 livestock
-      await ledger.connect(farmer).buyPolicy(1, 1, 100_000); // 2 drought
+      await buyFor(ledger, farmer, 4, 1, 300_000); // 1 livestock
+      await buyFor(ledger, farmer, 1, 1, 100_000); // 2 drought
       await time.increase(8 * DAY);
       await ledger.connect(farmer).fileClaim(1, hash("photo"));
       const deadline = (await time.latest()) + 3600;
@@ -118,7 +118,7 @@ describe("Notifications (SMS outbox + notifier)", function () {
       await ledger.connect(gov).fundSubsidy(100_000);
       await ledger.connect(gov).setSubsidy(4000, 0);
       await ledger.connect(gov).setSubsidyEligible(1, true);
-      await ledger.connect(farmer).buyPolicy(1, 1, 100_000);
+      await buyFor(ledger, farmer, 1, 1, 100_000);
       await claims.connect(farmer).fileClaim(1, hash("pests"), 0);
       await claims.connect(underwriter).review(1, true, 30_000);
       sent = [];
@@ -126,6 +126,33 @@ describe("Notifications (SMS outbox + notifier)", function () {
       const t = sent.map((m) => m.text);
       expect(t.some((x) => /you paid 6,000 RWF \(subsidy 4,000 RWF\)/.test(x))).to.equal(true);
       expect(t).to.include("FarmLedger: 30,000 RWF paid for policy #1 (loss claim approved by the insurer's reviewers).");
+    });
+  });
+
+  describe("application workflow messages (PolicyDesk)", function () {
+    it("tells the farmer and the agent at each step: assigned, applied, contract ready, issued", async () => {
+      const desk = await (await ethers.getContractFactory("PolicyDesk")).deploy(ctx.ledgerAddr);
+      await ctx.ledger.grantRole(await ctx.ledger.ISSUER_ROLE(), await desk.getAddress());
+      const agentSigner = (await ethers.getSigners())[16];
+      contacts.put(agentSigner.address, "250788000015", db);
+      notifier = createNotifier({ db, provider: ethers.provider, ledger: ctx.ledger, cropClaims: ctx.claims, desk, outbox, history: "all" });
+      await desk.connect(ctx.underwriter).appointAgent(agentSigner.address, [ethers.encodeBytes32String("BUGESERA")]);
+      await desk.connect(ctx.farmer).join(ethers.encodeBytes32String("BUGESERA"));
+      await desk.connect(agentSigner).submitApplication(ctx.farmer.address, 1, 1, 100_000, 0, 0, 120, hash("form"));
+      await desk.connect(ctx.underwriter).draftContract(1, 0, 100_000, 0, 120, hash("contract"));
+      await desk.connect(ctx.farmer).acceptOffer(1);
+      await notifier.tick();
+      const to = (phone) => sent.filter((m) => m.phone === phone).map((m) => m.text);
+      const farmer = to(ALINE), agent = to("250788000015");
+      expect(farmer).to.include("FarmLedger: your insurance agent is on +250788000015. They will collect your details and apply for cover for you.");
+      expect(farmer).to.include("FarmLedger: your agent applied for drought cover of 100,000 RWF (application #1). The insurer will review it.");
+      expect(farmer.some((t) => /^FarmLedger: your contract #1 is ready: cover 100,000 RWF, you pay 10,000 RWF\. Dial .*, choose 6 to review and pay by /.test(t))).to.equal(true);
+      expect(agent).to.include("FarmLedger: new farmer +25078...001 assigned to you. Collect their details and submit an application on the portal.");
+      expect(agent.some((t) => /^FarmLedger: contract #1 for \+25078\.\.\.001 is ready/.test(t))).to.equal(true);
+      expect(agent).to.include("FarmLedger: +25078...001 accepted contract #1; policy #1 is issued.");
+      const order = to(ALINE);
+      expect(order.findIndex((t) => /contract #1 is ready/.test(t))).to.be.lessThan(order.findIndex((t) => /policy #1 active/.test(t)));
+      for (const m of sent) expect(m.text.length, m.text).to.be.at.most(160);
     });
   });
 
@@ -190,7 +217,8 @@ describe("Notifications (SMS outbox + notifier)", function () {
     after(() => server.close());
     beforeEach(() => {
       requests = [];
-      for (const k of ["AT_USERNAME", "AT_API_KEY", "AT_BASE_URL", "AT_SENDER_ID", "SMS_ALLOWLIST"]) env[k] = process.env[k];
+      // provider settings from the developer's .env must not leak into these tests
+      for (const k of ["AT_USERNAME", "AT_API_KEY", "AT_BASE_URL", "AT_SENDER_ID", "SMS_ALLOWLIST", "SMS_PROVIDER", "INTOUCH_USERNAME", "INTOUCH_PASSWORD", "SMSGATE_URL"]) { env[k] = process.env[k]; delete process.env[k]; }
       Object.assign(process.env, { AT_USERNAME: "farmledger", AT_API_KEY: "test-key", AT_BASE_URL: `http://127.0.0.1:${server.address().port}` });
       delete process.env.SMS_ALLOWLIST; delete process.env.AT_SENDER_ID;
     });

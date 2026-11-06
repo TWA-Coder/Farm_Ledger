@@ -4,7 +4,7 @@ const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const { artifacts } = require("hardhat");
-const { ethers, loadFixture, time, farmerFixture, signAttestation, b32, hash } = require("./helpers");
+const { ethers, loadFixture, time, farmerFixture, signAttestation, b32, hash, buyFor } = require("./helpers");
 const { createUssd } = require("../services/ussd-core");
 const dbm = require("../web/server/db");
 
@@ -45,8 +45,8 @@ describe("USSD channel (monitoring and claim registration only)", function () {
     return reply;
   }
   const withPin = (phone) => dial(phone, [PIN, PIN]);
-  const buyCattle = () => ctx.ledger.connect(ctx.farmer).buyPolicy(4, 1, 300_000);
-  const buyCrop = () => ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000);
+  const buyCattle = () => buyFor(ctx.ledger, ctx.farmer, 4, 1, 300_000);
+  const buyCrop = () => buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
 
   describe("who can use it", function () {
     it("tells an unregistered number to register on the web and offers nothing else", async () => {
@@ -233,8 +233,12 @@ describe("USSD channel (monitoring and claim registration only)", function () {
     ];
 
     it("the service code contains no call that books, pays, mints, signs or registers anything", () => {
-      const src = fs.readFileSync(path.join(__dirname, "..", "services", "ussd-core.js"), "utf8")
+      // The only exceptions are delegations to the phone-account module, which signs with the FARMER's own key
+      // (never the gateway's) after the menu has checked the farmer's PIN. Payments go through payments.* likewise.
+      const DELEGATED = ["accounts.declineOffer("];
+      let src = fs.readFileSync(path.join(__dirname, "..", "services", "ussd-core.js"), "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "").split("\n").map((l) => l.replace(/^\s*\/\/.*$/, "").replace(/\s\/\/ .*$/, "")).join("\n");
+      for (const d of DELEGATED) src = src.split(d).join("accounts.DELEGATED(");
       // match real calls / property access, not words inside messages (e.g. "approved")
       for (const name of FORBIDDEN) {
         const esc = name.replace(/\./g, "\\.");
@@ -249,9 +253,9 @@ describe("USSD channel (monitoring and claim registration only)", function () {
     });
 
     it("the gateway key itself cannot book a policy on-chain", async () => {
-      await expect(ctx.ledger.connect(agent).buyPolicy(4, 1, 1000)).to.be.revertedWithCustomError(ctx.ledger, "NotRegistered");
+      await expect(buyFor(ctx.ledger, agent, 4, 1, 1000)).to.be.revertedWithCustomError(ctx.ledger, "NotRegistered");
       await expect(ctx.ledger.connect(agent).registerFarmer(hash("1199000000000001"), hash("250788000999"))).to.not.be.reverted; // anyone may register themselves...
-      await expect(ctx.ledger.connect(agent).buyPolicy(4, 1, 1000)).to.be.reverted; // ...but still owns no animal, so cannot cover Aline's
+      await expect(buyFor(ctx.ledger, agent, 4, 1, 1000)).to.be.reverted; // ...but still owns no animal, so cannot cover Aline's
     });
 
     it("no sequence of USSD inputs changes policies, assets, farmers or money", async () => {
