@@ -6,6 +6,8 @@ the underwriter drafts the contract, and the farmer pays it with Mobile Money. C
 weather and satellite readings; cattle claims are confirmed by certified veterinarians.
 
 Everything runs on your computer: a local blockchain, the web portal and the phone services. Money is test money.
+## Video link
+Link: https://www.awesomescreenshot.com/s/folder/F0PJpawyq8/a497fba71693471f295b84b72c5c87e7
 
 ## Requirements
 
