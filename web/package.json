@@ -1,0 +1,17 @@
+{
+  "name": "farmledger-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000"
+  },
+  "dependencies": {
+    "ethers": "^6.13.4",
+    "farmledger": "file:..",
+    "next": "14.2.15",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
+}
