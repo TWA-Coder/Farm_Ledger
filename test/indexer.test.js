@@ -1,6 +1,6 @@
 // The off-chain event index (web/server/indexer.js) that replaced the portal's scan of every log since block 0.
 const { expect } = require("chai");
-const { ethers, loadFixture, farmerFixture, b32, hash } = require("./helpers");
+const { ethers, loadFixture, farmerFixture, b32, hash, buyFor } = require("./helpers");
 const dbm = require("../web/server/db");
 const indexer = require("../web/server/indexer");
 const { encodeArgs, reviveArgs } = require("../web/shared/event-json");
@@ -63,7 +63,7 @@ describe("Event index", function () {
   it("indexes the CropClaims contract's events in the same chain-ordered list", async () => {
     const claims = await (await ethers.getContractFactory("CropClaims")).deploy(await ctx.ledger.getAddress());
     await ctx.ledger.grantRole(await ctx.ledger.ASSESSOR_ROLE(), await claims.getAddress());
-    await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000);
+    await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
     await claims.connect(ctx.farmer).fileClaim(1, hash("ev"), 0);
     await indexer.sync({ db, provider: ethers.provider, ledger: ctx.ledger, others: [claims] });
     const filed = indexer.events(db, { name: "CropClaimFiled" });

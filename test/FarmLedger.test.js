@@ -1,8 +1,7 @@
 const { expect } = require("chai");
 const {
   ethers, loadFixture, time, b32, hash, Cover, Metric, PolicyStatus, ClaimStatus,
-  deployFixture, farmerFixture, signAttestation,
-} = require("./helpers");
+  deployFixture, farmerFixture, signAttestation, buyFor } = require("./helpers");
 
 const DAY = 24 * 60 * 60;
 
@@ -78,7 +77,7 @@ describe("FarmLedger", function () {
     it("locks the premium and reserves the sum insured in escrow", async () => {
       const { ledger, token, farmer, underwriter, ledgerAddr } = await loadFixture(farmerFixture);
       const before = await token.balanceOf(farmer.address);
-      await expect(ledger.connect(farmer).buyPolicy(1, 1, 100_000))
+      await expect(buyFor(ledger, farmer, 1, 1, 100_000))
         .to.emit(ledger, "PolicyPurchased");
       expect(await token.balanceOf(farmer.address)).to.equal(before - 10_000n);
       const [balance, reserved, available, stats] = await ledger.poolStats(underwriter.address);
@@ -91,26 +90,26 @@ describe("FarmLedger", function () {
 
     it("refuses a policy the pool cannot fully cover", async () => {
       const { ledger, farmer } = await loadFixture(farmerFixture);
-      await expect(ledger.connect(farmer).buyPolicy(1, 1, 6_000_000))
+      await expect(buyFor(ledger, farmer, 1, 1, 6_000_000))
         .to.be.revertedWithCustomError(ledger, "InsufficientPool");
     });
 
     it("rejects someone else's asset, unknown assets, wrong asset types and inactive products", async () => {
       const { ledger, farmer, farmer2, underwriter } = await loadFixture(farmerFixture);
-      await expect(ledger.connect(farmer2).buyPolicy(1, 1, 1000))
+      await expect(buyFor(ledger, farmer2, 1, 1, 1000))
         .to.be.revertedWithCustomError(ledger, "NotOwner");
-      await expect(ledger.connect(farmer).buyPolicy(1, 99, 1000))
+      await expect(buyFor(ledger, farmer, 1, 99, 1000))
         .to.be.revertedWithCustomError(ledger, "UnknownAsset");
-      await expect(ledger.connect(farmer).buyPolicy(4, 5, 1000)) // livestock product, unknown animal
+      await expect(buyFor(ledger, farmer, 4, 5, 1000)) // livestock product, unknown animal
         .to.be.revertedWithCustomError(ledger, "UnknownAsset");
       await ledger.connect(underwriter).setProductActive(1, false);
-      await expect(ledger.connect(farmer).buyPolicy(1, 1, 1000))
+      await expect(buyFor(ledger, farmer, 1, 1, 1000))
         .to.be.revertedWithCustomError(ledger, "ProductInactive");
     });
 
     it("lets the underwriter withdraw only unreserved liquidity", async () => {
       const { ledger, farmer, underwriter } = await loadFixture(farmerFixture);
-      await ledger.connect(farmer).buyPolicy(1, 1, 1_000_000);
+      await buyFor(ledger, farmer, 1, 1, 1_000_000);
       const [, , available] = await ledger.poolStats(underwriter.address);
       await expect(ledger.connect(underwriter).withdrawLiquidity(available + 1n))
         .to.be.revertedWithCustomError(ledger, "WithdrawExceedsAvailable");
@@ -123,7 +122,7 @@ describe("FarmLedger", function () {
   describe("Mode 1 - parametric crop claims (FR-05, FR-06)", function () {
     async function withDroughtPolicy() {
       const ctx = await farmerFixture();
-      await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 200_000);
+      await buyFor(ctx.ledger, ctx.farmer, 1, 1, 200_000);
       return ctx;
     }
 
@@ -165,7 +164,7 @@ describe("FarmLedger", function () {
 
     it("pays flood cover only when rainfall exceeds the threshold", async () => {
       const { ledger, token, oracle, farmer } = await loadFixture(farmerFixture);
-      await ledger.connect(farmer).buyPolicy(2, 1, 100_000);
+      await buyFor(ledger, farmer, 2, 1, 100_000);
       await ledger.connect(oracle).postReading(1, Metric.Rainfall, 3000, await time.latest());
       expect((await ledger.getPolicy(1)).status).to.equal(PolicyStatus.Active);
       const before = await token.balanceOf(farmer.address);
@@ -175,7 +174,7 @@ describe("FarmLedger", function () {
 
     it("pays NDVI cover only from NDVI readings, not from rainfall readings", async () => {
       const { ledger, oracle, farmer } = await loadFixture(farmerFixture);
-      await ledger.connect(farmer).buyPolicy(3, 1, 100_000);
+      await buyFor(ledger, farmer, 3, 1, 100_000);
       await ledger.connect(oracle).postReading(1, Metric.Rainfall, 10, await time.latest());
       expect((await ledger.getPolicy(1)).status).to.equal(PolicyStatus.Active);
       await ledger.connect(oracle).postReading(1, Metric.NDVI, 2000, await time.latest());
@@ -184,9 +183,9 @@ describe("FarmLedger", function () {
 
     it("evaluates several policies on the same plot in one transaction", async () => {
       const { ledger, oracle, farmer } = await loadFixture(farmerFixture);
-      await ledger.connect(farmer).buyPolicy(1, 1, 100_000); // drought
-      await ledger.connect(farmer).buyPolicy(2, 1, 100_000); // flood (not triggered by low rain)
-      await ledger.connect(farmer).buyPolicy(1, 1, 50_000);  // second drought policy
+      await buyFor(ledger, farmer, 1, 1, 100_000); // drought
+      await buyFor(ledger, farmer, 2, 1, 100_000); // flood (not triggered by low rain)
+      await buyFor(ledger, farmer, 1, 1, 50_000);  // second drought policy
       await ledger.connect(oracle).postReading(1, Metric.Rainfall, 500, await time.latest());
       expect((await ledger.getPolicy(1)).status).to.equal(PolicyStatus.PaidOut);
       expect((await ledger.getPolicy(2)).status).to.equal(PolicyStatus.Active);
@@ -230,7 +229,7 @@ describe("FarmLedger", function () {
 
     it("is solvent: payouts never exceed pool balance across many triggered policies", async () => {
       const { ledger, oracle, farmer, underwriter } = await loadFixture(farmerFixture);
-      for (let i = 0; i < 10; i++) await ledger.connect(farmer).buyPolicy(1, 1, 400_000);
+      for (let i = 0; i < 10; i++) await buyFor(ledger, farmer, 1, 1, 400_000);
       await ledger.connect(oracle).postReading(1, Metric.Rainfall, 0, await time.latest());
       const [balance, reserved, , stats] = await ledger.poolStats(underwriter.address);
       expect(reserved).to.equal(0);
@@ -243,7 +242,7 @@ describe("FarmLedger", function () {
   describe("Mode 2 - livestock claims with vet attestation (FR-07..FR-10)", function () {
     async function withCowPolicy() {
       const ctx = await farmerFixture();
-      await ctx.ledger.connect(ctx.farmer).buyPolicy(4, 1, 300_000);
+      await buyFor(ctx.ledger, ctx.farmer, 4, 1, 300_000);
       return ctx;
     }
     async function claimReady() {
@@ -276,7 +275,7 @@ describe("FarmLedger", function () {
 
     it("refuses livestock claims on crop policies", async () => {
       const { ledger, farmer } = await loadFixture(farmerFixture);
-      await ledger.connect(farmer).buyPolicy(1, 1, 1000);
+      await buyFor(ledger, farmer, 1, 1, 1000);
       await time.increase(8 * DAY);
       await expect(ledger.connect(farmer).fileClaim(1, hash("p")))
         .to.be.revertedWithCustomError(ledger, "WrongAssetType");
@@ -362,14 +361,14 @@ describe("FarmLedger", function () {
 
     it("prevents a second policy on an animal that already has cover, and on a deceased animal", async () => {
       const ctx = await loadFixture(withCowPolicy);
-      await expect(ctx.ledger.connect(ctx.farmer).buyPolicy(4, 1, 1000))
+      await expect(buyFor(ctx.ledger, ctx.farmer, 4, 1, 1000))
         .to.be.revertedWithCustomError(ctx.ledger, "AssetAlreadyCovered");
       await time.increase(8 * DAY);
       await ctx.ledger.connect(ctx.farmer).fileClaim(1, hash("p"));
       const deadline = (await time.latest()) + 3600;
       const sig = await sign(ctx, ctx.vet, { deadline });
       await ctx.ledger.settleLivestockClaim(1, true, deadline, sig);
-      await expect(ctx.ledger.connect(ctx.farmer).buyPolicy(4, 1, 1000))
+      await expect(buyFor(ctx.ledger, ctx.farmer, 4, 1, 1000))
         .to.be.revertedWithCustomError(ctx.ledger, "AssetAlreadyCovered");
     });
   });
@@ -378,7 +377,7 @@ describe("FarmLedger", function () {
   describe("Vet certification and multi-signature attestation", function () {
     async function withCowPolicy() {
       const ctx = await farmerFixture();
-      await ctx.ledger.connect(ctx.farmer).buyPolicy(4, 1, 300_000);
+      await buyFor(ctx.ledger, ctx.farmer, 4, 1, 300_000);
       return ctx;
     }
     async function quorumReady() {
@@ -529,8 +528,8 @@ describe("FarmLedger", function () {
   describe("Claims agent (USSD) and application record", function () {
     async function setup() {
       const ctx = await farmerFixture();
-      await ctx.ledger.connect(ctx.farmer).buyPolicy(4, 1, 300_000); // policy 1: cattle
-      await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000); // policy 2: drought on plot 1
+      await buyFor(ctx.ledger, ctx.farmer, 4, 1, 300_000); // policy 1: cattle
+      await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000); // policy 2: drought on plot 1
       await ctx.ledger.grantRole(await ctx.ledger.CLAIMS_AGENT_ROLE(), ctx.outsider.address);
       return { ...ctx, agent: ctx.outsider };
     }
@@ -567,7 +566,7 @@ describe("FarmLedger", function () {
     it("gives the agent no way to book, change or settle anything", async () => {
       const { ledger, agent, token } = await loadFixture(setup);
       const policiesBefore = await ledger.policyCount();
-      await expect(ledger.connect(agent).buyPolicy(4, 1, 1000)).to.be.revertedWithCustomError(ledger, "NotRegistered");
+      await expect(buyFor(ledger, agent, 4, 1, 1000)).to.be.revertedWithCustomError(ledger, "NotRegistered");
       await expect(ledger.connect(agent).createProduct(Cover.Livestock, 0, 500, 365)).to.be.reverted;
       await expect(ledger.connect(agent).certifyVet(agent.address, ethers.id("L"), b32("X"), (await time.latest()) + 1000)).to.be.reverted;
       await expect(ledger.connect(agent).setVetQuorum(1)).to.be.reverted;
@@ -580,15 +579,14 @@ describe("FarmLedger", function () {
       expect(await ledger.policyCount()).to.equal(policiesBefore);
     });
 
-    it("anchors an application hash to a policy: holder only, once, non-zero", async () => {
-      const { ledger, farmer, farmer2 } = await loadFixture(setup);
-      const h = hash("application-1");
-      await expect(ledger.connect(farmer2).recordApplication(1, h)).to.be.revertedWithCustomError(ledger, "NotPolicyHolder");
-      await expect(ledger.connect(farmer).recordApplication(1, ethers.ZeroHash)).to.be.revertedWithCustomError(ledger, "InvalidInput");
-      await expect(ledger.connect(farmer).recordApplication(1, h)).to.emit(ledger, "ApplicationRecorded").withArgs(1, farmer.address, h);
-      expect(await ledger.applicationHashOf(1)).to.equal(h);
-      expect(await ledger.applicationHashOf(2)).to.equal(ethers.ZeroHash);
-      await expect(ledger.connect(farmer).recordApplication(1, hash("other"))).to.be.revertedWithCustomError(ledger, "ApplicationAlreadyRecorded");
+    it("records the drafted contract's hash with the policy it issues; only the issuer (PolicyDesk) can issue", async () => {
+      const { ledger, farmer } = await loadFixture(setup);
+      const h = hash("contract-3");
+      await expect(buyFor(ledger, farmer, 1, 1, 50_000, 0, 0, null, h)).to.emit(ledger, "ApplicationRecorded").withArgs(3, farmer.address, h);
+      expect(await ledger.applicationHashOf(3)).to.equal(h);
+      expect(await ledger.applicationHashOf(1)).to.equal(ethers.ZeroHash);
+      await expect(ledger.connect(farmer).issuePolicy(farmer.address, 1, 1, 50_000, 0, 0, 120, h))
+        .to.be.revertedWithCustomError(ledger, "AccessControlUnauthorizedAccount"); // farmers cannot book themselves
     });
 
     it("a holder filing through the web still works and is marked as a direct claim", async () => {
@@ -606,10 +604,10 @@ describe("FarmLedger", function () {
       await expect(ledger.connect(outsider).pause())
         .to.be.revertedWithCustomError(ledger, "AccessControlUnauthorizedAccount");
       await ledger.pause();
-      await expect(ledger.connect(farmer).buyPolicy(1, 1, 1000))
+      await expect(buyFor(ledger, farmer, 1, 1, 1000))
         .to.be.revertedWithCustomError(ledger, "EnforcedPause");
       await ledger.unpause();
-      await expect(ledger.connect(farmer).buyPolicy(1, 1, 1000)).to.emit(ledger, "PolicyPurchased");
+      await expect(buyFor(ledger, farmer, 1, 1, 1000)).to.emit(ledger, "PolicyPurchased");
     });
 
     it("only the admin changes the waiting period, within bounds", async () => {
@@ -628,7 +626,7 @@ describe("FarmLedger", function () {
 
     it("emits an event for every state transition (audit trail)", async () => {
       const { ledger, farmer, oracle } = await loadFixture(farmerFixture);
-      const tx = await ledger.connect(farmer).buyPolicy(1, 1, 100_000);
+      const tx = await buyFor(ledger, farmer, 1, 1, 100_000);
       await expect(tx).to.emit(ledger, "PolicyPurchased");
       await expect(ledger.connect(oracle).postReading(1, Metric.Rainfall, 1, await time.latest()))
         .to.emit(ledger, "ReadingPosted").and.to.emit(ledger, "PayoutExecuted");

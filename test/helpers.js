@@ -17,9 +17,15 @@ const NDVI_THRESHOLD = 3000;    // < 0.30
 async function deployFixture() {
   const [admin, underwriter, oracle, vet, farmer, farmer2, outsider, vet2, vet3] = await ethers.getSigners();
 
-  const token = await (await ethers.getContractFactory("MockRWF")).deploy();
+  const token = await (await ethers.getContractFactory("MockRWF")).deploy(true);
   const ledger = await (await ethers.getContractFactory("FarmLedger")).deploy(admin.address, await token.getAddress());
 
+  // governance hands the specialised roles out: vet registrar, guardian, and (for the ledger's own unit tests) an
+  // issuer account standing in for PolicyDesk, so purchase rules can be tested directly
+  await ledger.grantRole(await ledger.VET_REGISTRAR_ROLE(), admin.address);
+  await ledger.grantRole(await ledger.PAUSER_ROLE(), admin.address);
+  ISSUER = (await ethers.getSigners())[15];
+  await ledger.grantRole(await ledger.ISSUER_ROLE(), ISSUER.address);
   await ledger.grantRole(await ledger.UNDERWRITER_ROLE(), underwriter.address);
   await ledger.grantRole(await ledger.ORACLE_ROLE(), oracle.address);
   // certified vets: licence + sector + expiry (a bare role grant is NOT enough to sign claims)
@@ -46,6 +52,14 @@ async function deployFixture() {
   await ledger.connect(underwriter).createProduct(Cover.Livestock, 0, 500, 365);
 
   return { admin, underwriter, oracle, vet, vet2, vet3, farmer, farmer2, outsider, token, ledger, ledgerAddr };
+}
+
+// Issues a policy the way PolicyDesk does once the farmer accepted (same order of arguments as the old buyCover).
+// coverDays defaults to the product length, like the old buyPolicy.
+let ISSUER = null;
+async function buyFor(ledger, holder, productId, assetId, sumInsured, level = 0, startAt = 0, coverDays = null, contractHash = ethers.ZeroHash) {
+  const days = coverDays ?? Number((await ledger.getProduct(productId)).durationDays);
+  return ledger.connect(ISSUER).issuePolicy(holder.address ?? holder, productId, assetId, sumInsured, level, startAt, days, contractHash);
 }
 
 async function farmerFixture() {
@@ -82,5 +96,5 @@ async function signAttestation(vetSigner, ledger, { claimId, policyId, tagId, ap
 module.exports = {
   ethers, loadFixture, time, b32, hash, Cover, Metric, PolicyStatus, ClaimStatus,
   DROUGHT_THRESHOLD, FLOOD_THRESHOLD, NDVI_THRESHOLD,
-  deployFixture, farmerFixture, signAttestation,
+  deployFixture, farmerFixture, signAttestation, buyFor, issuer: () => ISSUER,
 };

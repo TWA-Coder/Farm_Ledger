@@ -1,8 +1,12 @@
-// Deploys MockRWF + FarmLedger + CropClaims, grants roles and writes the addresses/ABI the services and web app read.
+// Deploys MockRWF + FarmLedger + CropClaims + PolicyDesk, grants roles and writes the addresses/ABI the services and
+// web app read.
 //   Local:   npx hardhat node                      (terminal 1)
 //            npm run deploy:local                  (terminal 2)
-//   Testnet: set PRIVATE_KEY (+ optional UNDERWRITER_ADDRESS / ORACLE_ADDRESS / VET_ADDRESS) in .env, then
+//   Testnet: set PRIVATE_KEY and EVERY role address in .env (UNDERWRITER_ADDRESS, ORACLE_ADDRESS, USSD_AGENT_ADDRESS,
+//            VET_ADDRESS, GOVERNMENT_ADDRESS, VET_REGISTRAR_ADDRESS, GUARDIAN_ADDRESS), optionally GOVERNANCE_ADDRESS
+//            (e.g. a Safe multisig that becomes the only admin), then
 //            npx hardhat run scripts/deploy.js --network arbitrumSepolia
+//   Off the local chain no role falls back to the deployer: one key holding every role is the gap this avoids.
 const fs = require("fs");
 const path = require("path");
 const hre = require("hardhat");
@@ -13,17 +17,27 @@ async function main() {
   const deployer = signers[0];
   const local = ["localhost", "hardhat"].includes(network.name);
 
-  const underwriter = process.env.UNDERWRITER_ADDRESS || (local ? signers[1].address : deployer.address);
-  const oracle = process.env.ORACLE_ADDRESS || (local ? signers[2].address : deployer.address);
+  const role = (env, localSigner) => {
+    if (process.env[env]) return process.env[env];
+    if (local) return localSigner.address;
+    throw new Error(`Set ${env} in .env: off the local chain every role needs its own address.`);
+  };
+  const underwriter = role("UNDERWRITER_ADDRESS", signers[1]);
+  const oracle = role("ORACLE_ADDRESS", signers[2]);
   // The USSD gateway key: may ONLY register claims on behalf of holders (CLAIMS_AGENT_ROLE).
-  const claimsAgent = process.env.USSD_AGENT_ADDRESS || (local ? signers[9].address : deployer.address);
-  const vet = process.env.VET_ADDRESS || (local ? signers[3].address : deployer.address);
+  const claimsAgent = role("USSD_AGENT_ADDRESS", signers[9]);
+  const vet = role("VET_ADDRESS", signers[3]);
   // The premium-subsidy programme (government, e.g. NAIS): funds the subsidy pool and sets the rate.
-  const government = process.env.GOVERNMENT_ADDRESS || (local ? signers[12].address : deployer.address); // #10 is the bundler relayer
+  const government = role("GOVERNMENT_ADDRESS", signers[12]); // #10 is the bundler relayer
+  // Veterinary registrar (certifies vets) and guardian (emergency pause). Locally: the deployer, for the demo.
+  const vetRegistrar = role("VET_REGISTRAR_ADDRESS", deployer);
+  const guardian = role("GUARDIAN_ADDRESS", deployer);
 
   console.log(`Deploying to ${network.name} as ${deployer.address}`);
-  const token = await (await ethers.getContractFactory("MockRWF")).deploy();
+  // Test money. Local chain: an open faucet for the demo. Elsewhere only the treasury (TREASURY_ADDRESS) may mint.
+  const token = await (await ethers.getContractFactory("MockRWF")).deploy(local);
   await token.waitForDeployment();
+  if (!local) await (await token.setMinter(role("TREASURY_ADDRESS", deployer), true)).wait();
   const ledger = await (await ethers.getContractFactory("FarmLedger")).deploy(deployer.address, await token.getAddress());
   await ledger.waitForDeployment();
 
@@ -31,6 +45,17 @@ async function main() {
   await (await ledger.grantRole(await ledger.ORACLE_ROLE(), oracle)).wait();
   await (await ledger.grantRole(await ledger.CLAIMS_AGENT_ROLE(), claimsAgent)).wait();
   await (await ledger.grantRole(await ledger.SUBSIDY_ROLE(), government)).wait();
+  await (await ledger.grantRole(await ledger.VET_REGISTRAR_ROLE(), vetRegistrar)).wait();
+  await (await ledger.grantRole(await ledger.PAUSER_ROLE(), guardian)).wait();
+  // vet certification below is done by the deployer; locally it is the registrar, elsewhere it needs it briefly
+  const tempRegistrar = vetRegistrar.toLowerCase() !== deployer.address.toLowerCase();
+  if (tempRegistrar) await (await ledger.grantRole(await ledger.VET_REGISTRAR_ROLE(), deployer.address)).wait();
+
+  // Policies come only from PolicyDesk: agent application -> underwriter contract -> farmer acceptance.
+  const desk = await (await ethers.getContractFactory("PolicyDesk")).deploy(await ledger.getAddress());
+  await desk.waitForDeployment();
+  await (await ledger.grantRole(await ledger.ISSUER_ROLE(), await desk.getAddress())).wait();
+  await (await ledger.grantRole(await ledger.REGISTRAR_ROLE(), await desk.getAddress())).wait();
 
   // Crop loss claims reviewed by the underwriter's reviewers. Only this contract may pay assessed losses.
   const cropClaims = await (await ethers.getContractFactory("CropClaims")).deploy(await ledger.getAddress());
@@ -58,7 +83,7 @@ async function main() {
     const factory = await (await ethers.getContractFactory("SimpleAccountFactory")).deploy(await entryPoint.getAddress());
     await factory.waitForDeployment();
     const paymaster = await (await ethers.getContractFactory("FarmLedgerPaymaster")).deploy(
-      await entryPoint.getAddress(), [await ledger.getAddress(), await token.getAddress(), await cropClaims.getAddress()], ethers.parseEther(process.env.PAYMASTER_MAX_COST_ETH || "0.05"));
+      await entryPoint.getAddress(), [await ledger.getAddress(), await token.getAddress(), await cropClaims.getAddress(), await desk.getAddress()], ethers.parseEther(process.env.PAYMASTER_MAX_COST_ETH || "0.05"));
     await paymaster.waitForDeployment();
     await (await paymaster.deposit({ value: ethers.parseEther(process.env.PAYMASTER_DEPOSIT_ETH || (local ? "100" : "0.05")) })).wait();
     aa = {
@@ -69,6 +94,17 @@ async function main() {
     };
   }
 
+  if (tempRegistrar) await (await ledger.revokeRole(await ledger.VET_REGISTRAR_ROLE(), deployer.address)).wait();
+  // Hand governance to a multisig: it becomes the only admin and the deployer key keeps no power.
+  if (process.env.GOVERNANCE_ADDRESS && process.env.GOVERNANCE_ADDRESS.toLowerCase() !== deployer.address.toLowerCase()) {
+    await (await ledger.grantRole(await ledger.DEFAULT_ADMIN_ROLE(), process.env.GOVERNANCE_ADDRESS)).wait();
+    for (const r of ["PAUSER_ROLE", "VET_REGISTRAR_ROLE"]) {
+      if (await ledger.hasRole(await ledger[r](), deployer.address)) await (await ledger.revokeRole(await ledger[r](), deployer.address)).wait();
+    }
+    await (await ledger.renounceRole(await ledger.DEFAULT_ADMIN_ROLE(), deployer.address)).wait();
+    console.log(`Governance handed to ${process.env.GOVERNANCE_ADDRESS}; the deployer holds no role.`);
+  }
+
   const chainId = Number((await ethers.provider.getNetwork()).chainId);
   const info = {
     network: network.name,
@@ -77,7 +113,8 @@ async function main() {
     token: await token.getAddress(),
     ledger: await ledger.getAddress(),
     cropClaims: await cropClaims.getAddress(),
-    roles: { admin: deployer.address, underwriter, oracle, vet, claimsAgent, government },
+    policyDesk: await desk.getAddress(),
+    roles: { admin: process.env.GOVERNANCE_ADDRESS || deployer.address, underwriter, oracle, vet, claimsAgent, government, vetRegistrar, guardian },
     aa,
     deployedAt: new Date().toISOString(),
   };
@@ -88,14 +125,16 @@ async function main() {
   const ledgerArt = await artifacts.readArtifact("FarmLedger");
   const tokenArt = await artifacts.readArtifact("MockRWF");
   const claimsArt = await artifacts.readArtifact("CropClaims");
+  const deskArt = await artifacts.readArtifact("PolicyDesk");
   const webPublic = path.join(__dirname, "..", "web", "public");
   fs.mkdirSync(webPublic, { recursive: true });
   fs.writeFileSync(path.join(webPublic, "deployment.json"), JSON.stringify(info, null, 2));
-  fs.writeFileSync(path.join(webPublic, "abi.json"), JSON.stringify({ ledger: ledgerArt.abi, token: tokenArt.abi, cropClaims: claimsArt.abi }));
+  fs.writeFileSync(path.join(webPublic, "abi.json"), JSON.stringify({ ledger: ledgerArt.abi, token: tokenArt.abi, cropClaims: claimsArt.abi, policyDesk: deskArt.abi }));
 
   console.log("MockRWF   :", info.token);
   console.log("FarmLedger:", info.ledger);
   console.log("CropClaims:", info.cropClaims);
+  console.log("PolicyDesk:", info.policyDesk);
   console.log("Roles     :", info.roles);
   if (aa) console.log("Smart accounts:", aa);
   console.log(`Saved deployments/${network.name}.json and web/public/{deployment,abi}.json`);

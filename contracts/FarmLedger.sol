@@ -34,6 +34,14 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     // The CropClaims contract: may hold a crop policy open while a loss claim is reviewed, and pay the amount its
     // reviewers agreed. Granted to that contract only, never to a person.
     bytes32 public constant ASSESSOR_ROLE = keccak256("ASSESSOR_ROLE");
+    // The PolicyDesk contract: issues a policy once the underwriter drafted it and the farmer accepted and paid, and
+    // registers plots and animals that an insurance agent recorded for one of their farmers. Contract only.
+    bytes32 public constant ISSUER_ROLE = keccak256("ISSUER_ROLE");
+    bytes32 public constant REGISTRAR_ROLE = keccak256("REGISTRAR_ROLE");
+    // Veterinary registrar (e.g. the professional council): certifies and revokes vets. Separate from governance.
+    bytes32 public constant VET_REGISTRAR_ROLE = keccak256("VET_REGISTRAR_ROLE");
+    // Guardian: may pause at once in an emergency. Unpausing stays with governance (DEFAULT_ADMIN_ROLE).
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
     bytes32 private constant ATTESTATION_TYPEHASH =
         keccak256("Attestation(uint256 claimId,uint256 policyId,bytes32 tagId,bool approved,uint256 deadline)");
@@ -253,7 +261,6 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     error WithdrawExceedsAvailable(uint256 available);
     error AlreadyAttested();
     error InvalidQuorum();
-    error ApplicationAlreadyRecorded();
     error InvalidStart();
     error InvalidCoverPeriod();
     error UnknownTriggerLevel();
@@ -296,18 +303,28 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         emit FarmerPhoneChanged(msg.sender, newPhoneHash);
     }
 
-    function registerPlot(
-        int32 latE6,
-        int32 lonE6,
-        uint32 areaM2,
-        bytes32 crop,
-        bytes32 geoHash
-    ) external onlyFarmer whenNotPaused returns (uint256 plotId) {
+    function registerPlot(int32 latE6, int32 lonE6, uint32 areaM2, bytes32 crop, bytes32 geoHash)
+        external onlyFarmer whenNotPaused returns (uint256)
+    {
+        return _registerPlot(msg.sender, latE6, lonE6, areaM2, crop, geoHash);
+    }
+
+    /// @notice An insurance agent recorded this plot for one of their farmers (checked by PolicyDesk).
+    function registerPlotFor(address owner, int32 latE6, int32 lonE6, uint32 areaM2, bytes32 crop, bytes32 geoHash)
+        external onlyRole(REGISTRAR_ROLE) whenNotPaused returns (uint256)
+    {
+        if (!_farmers[owner].exists) revert NotRegistered();
+        return _registerPlot(owner, latE6, lonE6, areaM2, crop, geoHash);
+    }
+
+    function _registerPlot(address owner, int32 latE6, int32 lonE6, uint32 areaM2, bytes32 crop, bytes32 geoHash)
+        private returns (uint256 plotId)
+    {
         if (areaM2 == 0 || crop == bytes32(0)) revert InvalidInput();
         if (latE6 < -90_000_000 || latE6 > 90_000_000 || lonE6 < -180_000_000 || lonE6 > 180_000_000) revert InvalidInput();
         plotId = ++plotCount;
         _plots[plotId] = Plot({
-            owner: msg.sender,
+            owner: owner,
             latE6: latE6,
             lonE6: lonE6,
             areaM2: areaM2,
@@ -315,22 +332,33 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
             geoHash: geoHash,
             exists: true
         });
-        _plotsOf[msg.sender].push(plotId);
-        emit PlotRegistered(plotId, msg.sender, latE6, lonE6, areaM2, crop, geoHash);
+        _plotsOf[owner].push(plotId);
+        emit PlotRegistered(plotId, owner, latE6, lonE6, areaM2, crop, geoHash);
     }
 
-    function registerAnimal(
-        bytes32 tagId,
-        bytes32 breed,
-        uint16 birthYear,
-        bytes32 photoHash
-    ) external onlyFarmer whenNotPaused returns (uint256 animalId) {
+    function registerAnimal(bytes32 tagId, bytes32 breed, uint16 birthYear, bytes32 photoHash)
+        external onlyFarmer whenNotPaused returns (uint256)
+    {
+        return _registerAnimal(msg.sender, tagId, breed, birthYear, photoHash);
+    }
+
+    /// @notice An insurance agent recorded this animal for one of their farmers (checked by PolicyDesk).
+    function registerAnimalFor(address owner, bytes32 tagId, bytes32 breed, uint16 birthYear, bytes32 photoHash)
+        external onlyRole(REGISTRAR_ROLE) whenNotPaused returns (uint256)
+    {
+        if (!_farmers[owner].exists) revert NotRegistered();
+        return _registerAnimal(owner, tagId, breed, birthYear, photoHash);
+    }
+
+    function _registerAnimal(address owner, bytes32 tagId, bytes32 breed, uint16 birthYear, bytes32 photoHash)
+        private returns (uint256 animalId)
+    {
         if (tagId == bytes32(0)) revert InvalidInput();
         if (_animalByTag[tagId] != 0) revert TagAlreadyRegistered();
         animalId = ++animalCount;
         _animalByTag[tagId] = animalId;
         _animals[animalId] = Animal({
-            owner: msg.sender,
+            owner: owner,
             tagId: tagId,
             breed: breed,
             birthYear: birthYear,
@@ -338,8 +366,8 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
             deceased: false,
             exists: true
         });
-        _animalsOf[msg.sender].push(animalId);
-        emit AnimalRegistered(animalId, msg.sender, tagId, breed, birthYear, photoHash);
+        _animalsOf[owner].push(animalId);
+        emit AnimalRegistered(animalId, owner, tagId, breed, birthYear, photoHash);
     }
 
     // =================================================================
@@ -395,7 +423,9 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         emit LiquidityDeposited(msg.sender, amount);
     }
 
-    function withdrawLiquidity(uint256 amount) external onlyRole(UNDERWRITER_ROLE) nonReentrant {
+    /// @notice Any pool owner may take out its unreserved funds, also after its underwriter role was revoked
+    ///         (a suspended insurer sells nothing new, but its money is never locked in).
+    function withdrawLiquidity(uint256 amount) external nonReentrant {
         uint256 available = poolBalance[msg.sender] - poolReserved[msg.sender];
         if (amount == 0 || amount > available) revert WithdrawExceedsAvailable(available);
         poolBalance[msg.sender] -= amount;
@@ -426,31 +456,34 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         return premium == 0 ? 1 : premium;
     }
 
-    /// @notice Original purchase: cover starts now, for the product's full length, at the standard trigger (level 0).
-    function buyPolicy(
-        uint256 productId,
-        uint256 assetId,
-        uint256 sumInsured
-    ) external onlyFarmer whenNotPaused nonReentrant returns (uint256 policyId) {
-        return _buy(productId, assetId, sumInsured, 0, 0, _products[productId].durationDays);
-    }
-
-    /// @notice Purchase with chosen terms.
-    /// @param level     trigger level (see getTriggerLevels); 0 for livestock
-    /// @param startAt   0 = now, otherwise a future time within MAX_START_DELAY (never in the past: no insuring known losses)
-    /// @param coverDays between MIN_COVER_DAYS (or the product length if shorter) and the product length
-    function buyCover(
+    /// @notice Issues a policy. Farmers do not book directly: an insurance agent submits the application, the
+    ///         underwriter drafts the contract and the farmer accepts and pays it, all in PolicyDesk, which then calls
+    ///         this. The premium (minus any subsidy) is taken from the holder, who approved this contract.
+    /// @param level        trigger level (see getTriggerLevels); 0 for livestock
+    /// @param startAt      0 = now, otherwise a future time within MAX_START_DELAY (never in the past)
+    /// @param coverDays    between MIN_COVER_DAYS (or the product length if shorter) and the product length
+    /// @param contractHash hash of the signed contract document and application (recorded with the policy)
+    function issuePolicy(
+        address holder,
         uint256 productId,
         uint256 assetId,
         uint256 sumInsured,
         uint8 level,
         uint64 startAt,
-        uint32 coverDays
-    ) external onlyFarmer whenNotPaused nonReentrant returns (uint256 policyId) {
-        return _buy(productId, assetId, sumInsured, level, startAt, coverDays);
+        uint32 coverDays,
+        bytes32 contractHash
+    ) external onlyRole(ISSUER_ROLE) whenNotPaused nonReentrant returns (uint256 policyId) {
+        if (!_farmers[holder].exists) revert NotRegistered();
+        if (!hasRole(UNDERWRITER_ROLE, _products[productId].underwriter)) revert ProductInactive(); // suspended insurer
+        policyId = _buy(holder, productId, assetId, sumInsured, level, startAt, coverDays);
+        if (contractHash != bytes32(0)) {
+            _applicationHash[policyId] = contractHash;
+            emit ApplicationRecorded(policyId, holder, contractHash);
+        }
     }
 
     function _buy(
+        address holder,
         uint256 productId,
         uint256 assetId,
         uint256 sumInsured,
@@ -470,13 +503,13 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         if (p.cover == Cover.Livestock) {
             Animal storage a = _animals[assetId];
             if (!a.exists) revert UnknownAsset();
-            if (a.owner != msg.sender) revert NotOwner();
+            if (a.owner != holder) revert NotOwner();
             if (a.deceased || _animalCovered[assetId]) revert AssetAlreadyCovered();
             _animalCovered[assetId] = true;
         } else {
             Plot storage pl = _plots[assetId];
             if (!pl.exists) revert UnknownAsset();
-            if (pl.owner != msg.sender) revert NotOwner();
+            if (pl.owner != holder) revert NotOwner();
             if (_activePolicesOfPlot[assetId].length >= MAX_POLICIES_PER_PLOT) revert TooManyPolicies();
         }
 
@@ -489,7 +522,7 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         int256 threshold = _levels[productId][level].threshold;
 
         _policies[policyId] = Policy({
-            holder: msg.sender,
+            holder: holder,
             productId: productId,
             assetId: assetId,
             sumInsured: sumInsured,
@@ -500,14 +533,14 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
             level: level,
             threshold: threshold
         });
-        _policiesOf[msg.sender].push(policyId);
+        _policiesOf[holder].push(policyId);
         if (p.cover != Cover.Livestock) _activePolicesOfPlot[assetId].push(policyId);
 
-        uint256 subsidy = subsidyFor(msg.sender, productId, premium);
+        uint256 subsidy = subsidyFor(holder, productId, premium);
         if (subsidy > 0) {
             subsidyPool -= subsidy;
             subsidyPaid += subsidy;
-            subsidyUsed[msg.sender] += subsidy;
+            subsidyUsed[holder] += subsidy;
             subsidyOf[policyId] = subsidy;
         }
 
@@ -517,10 +550,10 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         s.premiums += premium;
         s.policiesSold += 1;
 
-        token.safeTransferFrom(msg.sender, address(this), premium - subsidy);
-        emit PolicyPurchased(policyId, msg.sender, productId, assetId, sumInsured, premium, start, end);
+        token.safeTransferFrom(holder, address(this), premium - subsidy);
+        emit PolicyPurchased(policyId, holder, productId, assetId, sumInsured, premium, start, end);
         emit PolicyTerms(policyId, level, threshold, coverDays);
-        if (subsidy > 0) emit PremiumSubsidised(policyId, msg.sender, subsidy, premium - subsidy);
+        if (subsidy > 0) emit PremiumSubsidised(policyId, holder, subsidy, premium - subsidy);
     }
 
     /// @notice Anyone may close a policy that has run its course, releasing the reserved funds.
@@ -594,17 +627,6 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         if (_policies[policyId].holder == address(0)) revert NotPolicyHolder();
         claimId = _fileClaim(policyId, evidenceHash);
         emit ClaimChannel(claimId, msg.sender, true);
-    }
-
-    /// @notice Anchors the booking application (form data + uploaded documents) to the policy by hash,
-    ///         so the off-chain file set cannot be altered later without detection. Holder only, once.
-    function recordApplication(uint256 policyId, bytes32 applicationHash) external {
-        Policy storage pol = _policies[policyId];
-        if (pol.holder != msg.sender) revert NotPolicyHolder();
-        if (applicationHash == bytes32(0)) revert InvalidInput();
-        if (_applicationHash[policyId] != bytes32(0)) revert ApplicationAlreadyRecorded();
-        _applicationHash[policyId] = applicationHash;
-        emit ApplicationRecorded(policyId, msg.sender, applicationHash);
     }
 
     function applicationHashOf(uint256 policyId) external view returns (bytes32) {
@@ -752,7 +774,7 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     /// @notice Certifies (or renews) a veterinarian: records the licence and grants the vet role.
     function certifyVet(address vet, bytes32 licenseHash, bytes32 sector, uint64 validUntil)
         external
-        onlyRole(DEFAULT_ADMIN_ROLE)
+        onlyRole(VET_REGISTRAR_ROLE)
     {
         if (vet == address(0) || licenseHash == bytes32(0) || sector == bytes32(0)) revert InvalidInput();
         if (validUntil <= block.timestamp) revert InvalidInput();
@@ -769,7 +791,7 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
     }
 
     /// @notice Withdraws a vet's certification immediately (their signatures stop counting).
-    function revokeVet(address vet) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function revokeVet(address vet) external onlyRole(VET_REGISTRAR_ROLE) {
         if (_vetProfiles[vet].certifiedAt == 0) revert InvalidInput();
         _vetProfiles[vet].active = false;
         _revokeRole(VET_ROLE, vet);
@@ -783,7 +805,7 @@ contract FarmLedger is AccessControl, EIP712, ReentrancyGuard, Pausable {
         emit VetQuorumChanged(quorum);
     }
 
-    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }
 

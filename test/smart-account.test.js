@@ -11,13 +11,18 @@ async function aaFixture() {
   const [admin] = await ethers.getSigners();
   const entryPoint = await (await ethers.getContractFactory("EntryPoint")).deploy();
   const factory = await (await ethers.getContractFactory("SimpleAccountFactory")).deploy(await entryPoint.getAddress());
+  const desk = await (await ethers.getContractFactory("PolicyDesk")).deploy(await base.ledger.getAddress());
+  await base.ledger.grantRole(await base.ledger.ISSUER_ROLE(), await desk.getAddress());
+  await base.ledger.grantRole(await base.ledger.REGISTRAR_ROLE(), await desk.getAddress());
+  const agent = (await ethers.getSigners())[16];
+  await desk.connect(base.underwriter).appointAgent(agent.address, [ethers.encodeBytes32String("BUGESERA")]);
   const paymaster = await (await ethers.getContractFactory("FarmLedgerPaymaster")).deploy(
-    await entryPoint.getAddress(), [await base.ledger.getAddress(), await base.token.getAddress()], ethers.parseEther("0.05"));
+    await entryPoint.getAddress(), [await base.ledger.getAddress(), await base.token.getAddress(), await desk.getAddress()], ethers.parseEther("0.05"));
   await paymaster.deposit({ value: ethers.parseEther("10") });
   const bundler = (await ethers.getSigners())[10];
   const owner = ethers.Wallet.createRandom();
   const sender = await factory["getAddress(address,uint256)"](owner.address, 0);
-  return { ...base, admin, entryPoint, factory, paymaster, bundler, owner, sender };
+  return { ...base, admin, entryPoint, factory, paymaster, bundler, owner, sender, desk, agent };
 }
 
 async function send(ctx, calls, { deploy = false, signer = ctx.owner } = {}) {
@@ -61,10 +66,18 @@ describe("Farmer smart accounts (ERC-4337, sponsored fees)", function () {
       { to: L, data: ledger.interface.encodeFunctionData("registerPlot", [-2_150_000, 30_150_000, 5000, b32("MAIZE"), hash("p")]) },
     ]);
     expect(r.success).to.equal(true);
+    // the farmer joins (district), their agent applies, the underwriter drafts; the farmer accepts and pays in ONE op
+    const { desk, agent, underwriter } = ctx;
+    const D = await desk.getAddress();
+    r = await send(ctx, [{ to: D, data: desk.interface.encodeFunctionData("join", [b32("BUGESERA")]) }]);
+    expect(r.success).to.equal(true);
+    expect(await desk.agentOf(sender)).to.equal(agent.address);
+    await desk.connect(agent).submitApplication(sender, 1, 1, 100_000, 0, 0, 60, hash("form"));
+    await desk.connect(underwriter).draftContract(1, 0, 100_000, 0, 60, hash("contract"));
     const premium = await ledger.quoteCover(1, 0, 100_000, 60);
     r = await send(ctx, [
       { to: T, data: token.interface.encodeFunctionData("approve", [L, premium]) },
-      { to: L, data: ledger.interface.encodeFunctionData("buyCover", [1, 1, 100_000, 0, 0, 60]) },
+      { to: D, data: desk.interface.encodeFunctionData("acceptOffer", [1]) },
     ]);
     expect(r.success).to.equal(true);
     const p = await ledger.getPolicy(1);
@@ -78,7 +91,7 @@ describe("Farmer smart accounts (ERC-4337, sponsored fees)", function () {
 
   it("contract errors come back as the FarmLedger revert reason", async () => {
     const ctx = await loadFixture(aaFixture);
-    const r = await send(ctx, [{ to: await ctx.ledger.getAddress(), data: ctx.ledger.interface.encodeFunctionData("buyPolicy", [1, 1, 1000]) }], { deploy: true });
+    const r = await send(ctx, [{ to: await ctx.ledger.getAddress(), data: ctx.ledger.interface.encodeFunctionData("registerPlot", [-2_150_000, 30_150_000, 5000, b32("MAIZE"), hash("p")]) }], { deploy: true });
     expect(r.success).to.equal(false);
     expect(ctx.ledger.interface.parseError(r.revert).name).to.equal("NotRegistered");
   });

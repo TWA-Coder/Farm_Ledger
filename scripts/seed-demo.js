@@ -65,11 +65,26 @@ async function main() {
     await (await claims.connect(underwriter).setReviewQuorum(2)).wait();
   }
 
+  // Insurance agents appointed by the underwriter, by district. Farmers do not book cover: their agent submits the
+  // application, the underwriter drafts the contract, the farmer accepts and pays (PolicyDesk).
+  if (info.policyDesk) {
+    const desk = await ethers.getContractAt("PolicyDesk", info.policyDesk);
+    const [eric, claudine] = [signers[15], signers[16]];
+    const D = (...names) => names.map((n) => b32(n.toUpperCase()));
+    await (await desk.connect(underwriter).appointAgent(eric.address, D("Bugesera", "Kayonza", "Rwamagana"))).wait();
+    await (await desk.connect(underwriter).appointAgent(claudine.address, D("Nyagatare", "Huye", "Musanze"))).wait();
+    contacts.put(eric.address, "250788000015");     // agents get SMS too (demo numbers: never texted live)
+    contacts.put(claudine.address, "250788000016");
+    await (await desk.connect(aline).join(b32("BUGESERA"))).wait();  // -> Eric
+    await (await desk.connect(jean).join(b32("NYAGATARE"))).wait();  // -> Claudine
+  }
+
   // For the demo the livestock waiting period is shortened to 0 (production default: 7 days).
   await (await ledger.setWaitingPeriod(0)).wait();
 
   console.log("Seeded: 4 products (with trigger levels), 2 farmers (Aline, Jean), 2 plots, 2 cows, 10,000,000 mRWF liquidity,");
-  console.log("        40% premium subsidy (5,000,000 mRWF pool, 200,000 cap per farmer), crop claim reviewers 2-of-2.");
+  console.log("        40% premium subsidy (5,000,000 mRWF pool, 200,000 cap per farmer), crop claim reviewers 2-of-2,");
+  console.log("        agents Eric (Bugesera, Kayonza, Rwamagana; Aline) and Claudine (Nyagatare, Huye, Musanze; Jean).");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

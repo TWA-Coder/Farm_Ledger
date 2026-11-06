@@ -1,7 +1,7 @@
 // Phase 2 contract features: government premium subsidy, phone number change, and crop loss claims decided by the
 // underwriter's reviewers (CropClaims.sol, M-of-N).
 const { expect } = require("chai");
-const { ethers, loadFixture, time, b32, hash, Cover, Metric, PolicyStatus, farmerFixture } = require("./helpers");
+const { ethers, loadFixture, time, b32, hash, Cover, Metric, PolicyStatus, farmerFixture, buyFor } = require("./helpers");
 
 const DAY = 24 * 3600;
 const S = { None: 0, Pending: 1, Approved: 2, Rejected: 3, Superseded: 4 };
@@ -30,7 +30,7 @@ describe("Premium subsidy", function () {
   it("without a programme the farmer pays the whole premium", async () => {
     const { ledger, token, farmer } = await loadFixture(phase2Fixture);
     const before = await token.balanceOf(farmer.address);
-    await ledger.connect(farmer).buyPolicy(1, 1, 100_000); // drought, 10%
+    await buyFor(ledger, farmer, 1, 1, 100_000); // drought, 10%
     expect(before - (await token.balanceOf(farmer.address))).to.equal(10_000n);
     expect(await ledger.subsidyOf(1)).to.equal(0n);
   });
@@ -44,7 +44,7 @@ describe("Premium subsidy", function () {
 
     const farmerBefore = await token.balanceOf(farmer.address);
     const poolBefore = await ledger.poolBalance(underwriter.address);
-    await expect(ledger.connect(farmer).buyPolicy(1, 1, 100_000))
+    await expect(buyFor(ledger, farmer, 1, 1, 100_000))
       .to.emit(ledger, "PremiumSubsidised").withArgs(1, farmer.address, 4_000, 6_000);
     expect(farmerBefore - (await token.balanceOf(farmer.address))).to.equal(6_000n);
     expect((await ledger.poolBalance(underwriter.address)) - poolBefore).to.equal(10_000n);
@@ -61,7 +61,7 @@ describe("Premium subsidy", function () {
     await ledger.connect(gov).setSubsidy(4000, 0);
     await ledger.connect(gov).setSubsidyEligible(1, true);
     expect(await ledger.subsidyFor(farmer.address, 2, 10_000)).to.equal(0n);
-    await expect(ledger.connect(farmer).buyPolicy(2, 1, 100_000)).not.to.emit(ledger, "PremiumSubsidised");
+    await expect(buyFor(ledger, farmer, 2, 1, 100_000)).not.to.emit(ledger, "PremiumSubsidised");
   });
 
   it("is limited by the per-farmer cap and by the money left in the pool", async () => {
@@ -71,16 +71,16 @@ describe("Premium subsidy", function () {
     await ledger.connect(gov).setSubsidyEligible(2, true);
     await ledger.connect(gov).fundSubsidy(7_000);
 
-    await ledger.connect(farmer).buyPolicy(1, 1, 100_000); // premium 10,000 -> 4,000
+    await buyFor(ledger, farmer, 1, 1, 100_000); // premium 10,000 -> 4,000
     expect(await ledger.subsidyFor(farmer.address, 2, 8_000)).to.equal(1_000n); // cap leaves 1,000
-    await ledger.connect(farmer).buyPolicy(2, 1, 100_000); // premium 8,000 -> 1,000 (cap reached)
+    await buyFor(ledger, farmer, 2, 1, 100_000); // premium 8,000 -> 1,000 (cap reached)
     expect(await ledger.subsidyOf(2)).to.equal(1_000n);
     expect(await ledger.subsidyFor(farmer.address, 1, 10_000)).to.equal(0n);
 
     // farmer2: pool has 2,000 left, so 2,000 instead of 4,000
     await ledger.connect(farmer2).registerPlot(-1_300_000, 30_300_000, 8000, b32("BEANS"), hash("geo-2"));
     const before = await token.balanceOf(farmer2.address);
-    await ledger.connect(farmer2).buyPolicy(1, 2, 100_000);
+    await buyFor(ledger, farmer2, 1, 2, 100_000);
     expect(await ledger.subsidyOf(3)).to.equal(2_000n);
     expect(before - (await token.balanceOf(farmer2.address))).to.equal(8_000n);
     expect(await ledger.subsidyPool()).to.equal(0n);
@@ -99,6 +99,18 @@ describe("Premium subsidy", function () {
   });
 });
 
+describe("Test token issuing", function () {
+  it("with the faucet closed only appointed minters (the treasury) can create money", async () => {
+    const [owner, treasury, outsider] = await ethers.getSigners();
+    const t = await (await ethers.getContractFactory("MockRWF")).deploy(false);
+    await expect(t.connect(outsider).mint(outsider.address, 1)).to.be.revertedWithCustomError(t, "NotMinter");
+    await expect(t.connect(outsider).setMinter(outsider.address, true)).to.be.revertedWithCustomError(t, "OwnableUnauthorizedAccount");
+    await t.connect(owner).setMinter(treasury.address, true);
+    await t.connect(treasury).mint(outsider.address, 500);
+    expect(await t.balanceOf(outsider.address)).to.equal(500n);
+  });
+});
+
 describe("Phone number change", function () {
   it("a registered farmer can record a new phone hash; the account keeps its assets", async () => {
     const { ledger, farmer, outsider } = await loadFixture(phase2Fixture);
@@ -114,7 +126,7 @@ describe("Phone number change", function () {
 describe("Crop loss claims (CropClaims)", function () {
   async function insured() {
     const ctx = await loadFixture(phase2Fixture);
-    await ctx.ledger.connect(ctx.farmer).buyPolicy(1, 1, 100_000); // policy 1, drought on plot 1
+    await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000); // policy 1, drought on plot 1
     return ctx;
   }
 
@@ -210,7 +222,7 @@ describe("Crop loss claims (CropClaims)", function () {
     await expect(claims.connect(farmer).fileClaim(1, ethers.ZeroHash, 0)).to.be.revertedWithCustomError(claims, "InvalidInput");
     await expect(claims.connect(farmer).fileClaim(1, hash("ev"), 100_001)).to.be.revertedWithCustomError(claims, "InvalidInput");
 
-    await ledger.connect(farmer).buyPolicy(4, 1, 300_000); // policy 2: livestock -> vets, not this contract
+    await buyFor(ledger, farmer, 4, 1, 300_000); // policy 2: livestock -> vets, not this contract
     await expect(claims.connect(farmer).fileClaim(2, hash("ev"), 0)).to.be.revertedWithCustomError(claims, "WrongCover");
 
     await expect(claims.connect(agent).fileClaimFor(1, hash("ev"), 0))
