@@ -32,11 +32,11 @@ describe("Notifications (SMS outbox + notifier)", function () {
 
   beforeEach(async () => {
     ctx = await loadFixture(fixture);
-    db = dbm.open(":memory:");
+    db = dbm.openIsolated();
     sent = [];
     clock = Date.now();
-    contacts.put(ctx.farmer.address, ALINE, db);
-    contacts.put(ctx.farmer2.address, JEAN, db);
+    (await contacts.put(ctx.farmer.address, ALINE, db));
+    (await contacts.put(ctx.farmer2.address, JEAN, db));
     build();
   });
 
@@ -50,6 +50,19 @@ describe("Notifications (SMS outbox + notifier)", function () {
       expect(aline[0]).to.match(/^Welcome to FarmLedger/);
       expect(aline[1]).to.match(/^FarmLedger: policy #1 active until .* Cover 100,000 RWF, premium 10,000 RWF\.$/);
       expect(aline[2]).to.equal("FarmLedger: 100,000 RWF paid for policy #1 (triggered by weather/satellite data).");
+      for (const m of sent) expect(m.text.length, m.text).to.be.at.most(160);
+    });
+
+    it("texts a farmer who chose Kinyarwanda in Kinyarwanda, and the others in English", async () => {
+      await require("../services/lang").setLang(db, ALINE, "rw");
+      await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
+      await ctx.ledger.connect(ctx.oracle).postReading(1, Metric.Rainfall, 900, await time.latest());
+      await notifier.tick();
+      const aline = sent.filter((m) => m.phone === ALINE).map((m) => m.text);
+      expect(aline[0]).to.match(/^Murakaza neza kuri FarmLedger/);
+      expect(aline[1]).to.match(/^FarmLedger: ubwishingizi #1 burakora kugeza \d{2}\/\d{2}\/\d{4}\. Bwishingira 100,000 RWF, umusanzu 10,000 RWF\.$/);
+      expect(aline[2]).to.equal("FarmLedger: 100,000 RWF zishyuwe ku bwishingizi #1 (byagaragajwe n'amakuru y'ikirere n'icyogajuru).");
+      expect(sent.find((m) => m.phone === JEAN).text).to.match(/^Welcome to FarmLedger/);
       for (const m of sent) expect(m.text.length, m.text).to.be.at.most(160);
     });
 
@@ -134,7 +147,7 @@ describe("Notifications (SMS outbox + notifier)", function () {
       const desk = await (await ethers.getContractFactory("PolicyDesk")).deploy(ctx.ledgerAddr);
       await ctx.ledger.grantRole(await ctx.ledger.ISSUER_ROLE(), await desk.getAddress());
       const agentSigner = (await ethers.getSigners())[16];
-      contacts.put(agentSigner.address, "250788000015", db);
+      (await contacts.put(agentSigner.address, "250788000015", db));
       notifier = createNotifier({ db, provider: ethers.provider, ledger: ctx.ledger, cropClaims: ctx.claims, desk, outbox, history: "all" });
       await desk.connect(ctx.underwriter).appointAgent(agentSigner.address, [ethers.encodeBytes32String("BUGESERA")]);
       await desk.connect(ctx.farmer).join(ethers.encodeBytes32String("BUGESERA"));
@@ -163,9 +176,9 @@ describe("Notifications (SMS outbox + notifier)", function () {
         if (fail && phone === ALINE) return { ok: false, transient: true, error: "500 InternalServerError" };
         sent.push({ phone, text }); return { ok: true, providerId: "x" + sent.length };
       } });
-      outbox.enqueue({ phone: ALINE, text: "first", key: "a" });
-      outbox.enqueue({ phone: ALINE, text: "second", key: "b" });
-      outbox.enqueue({ phone: JEAN, text: "other phone", key: "c" });
+      (await outbox.enqueue({ phone: ALINE, text: "first", key: "a" }));
+      (await outbox.enqueue({ phone: ALINE, text: "second", key: "b" }));
+      (await outbox.enqueue({ phone: JEAN, text: "other phone", key: "c" }));
       await outbox.drain();
       expect(sent.map((m) => m.text)).to.deep.equal(["other phone"]); // Aline's second waits behind her first
       fail = false;
@@ -174,32 +187,32 @@ describe("Notifications (SMS outbox + notifier)", function () {
       clock += BACKOFF_MS[0];
       await outbox.drain();
       expect(sent.map((m) => m.text)).to.deep.equal(["other phone", "first", "second"]);
-      expect(outbox.stats()).to.deep.equal({ sent: 3 });
+      expect((await outbox.stats())).to.deep.equal({ sent: 3 });
     });
 
     it("gives up on a permanent failure and records why", async () => {
       build({ send: async () => ({ ok: false, transient: false, error: "403 InvalidPhoneNumber" }) });
-      outbox.enqueue({ phone: "250700000000", text: "x", key: "k" });
+      (await outbox.enqueue({ phone: "250700000000", text: "x", key: "k" }));
       await outbox.drain();
-      expect(db.prepare("SELECT status, error FROM sms_outbox").get()).to.deep.equal({ status: "failed", error: "403 InvalidPhoneNumber" });
+      expect((await db.one("SELECT status, error FROM sms_outbox"))).to.deep.equal({ status: "failed", error: "403 InvalidPhoneNumber" });
     });
 
     it("one-time codes are stored masked and are not retried from the queue", async () => {
       build({ send: async () => ({ ok: false, transient: true, error: "network" }) });
       await outbox.sendNow(ALINE, "FarmLedger code: 123456. Valid 10 minutes.", { kind: "otp", secret: "123456" });
-      const row = db.prepare("SELECT text, status FROM sms_outbox").get();
+      const row = (await db.one("SELECT text, status FROM sms_outbox"));
       expect(row).to.deep.equal({ text: "FarmLedger code: ******. Valid 10 minutes.", status: "failed" });
     });
 
     it("records Africa's Talking delivery reports", async () => {
-      outbox.enqueue({ phone: ALINE, text: "x", key: "k" });
+      (await outbox.enqueue({ phone: ALINE, text: "x", key: "k" }));
       await outbox.drain();
-      expect(outbox.recordDelivery({ id: "ATXid_1", status: "Success" })).to.equal(true);
-      expect(outbox.recordDelivery({ id: "unknown", status: "Success" })).to.equal(false);
-      outbox.enqueue({ phone: JEAN, text: "y", key: "j" });
+      expect((await outbox.recordDelivery({ id: "ATXid_1", status: "Success" }))).to.equal(true);
+      expect((await outbox.recordDelivery({ id: "unknown", status: "Success" }))).to.equal(false);
+      (await outbox.enqueue({ phone: JEAN, text: "y", key: "j" }));
       await outbox.drain();
-      outbox.recordDelivery({ id: "ATXid_2", status: "Failed", failureReason: "AbsentSubscriber" });
-      expect(db.prepare("SELECT phone, status, error FROM sms_outbox ORDER BY id").all()).to.deep.equal([
+      (await outbox.recordDelivery({ id: "ATXid_2", status: "Failed", failureReason: "AbsentSubscriber" }));
+      expect((await db.all("SELECT phone, status, error FROM sms_outbox ORDER BY id"))).to.deep.equal([
         { phone: ALINE, status: "delivered", error: null }, { phone: JEAN, status: "undeliverable", error: "AbsentSubscriber" }]);
     });
   });
@@ -234,7 +247,7 @@ describe("Notifications (SMS outbox + notifier)", function () {
       expect(requests[0].url).to.equal("/version1/messaging");
       expect(requests[0].headers.apikey).to.equal("test-key");
       expect(requests[0].form).to.deep.equal({ username: "farmledger", to: "+250788000001", message: "hello" });
-      expect(db.prepare("SELECT status, provider_id, cost FROM sms_outbox").get()).to.deep.equal({ status: "sent", provider_id: "ATXid_abc", cost: "RWF 10.0000" });
+      expect((await db.one("SELECT status, provider_id, cost FROM sms_outbox"))).to.deep.equal({ status: "sent", provider_id: "ATXid_abc", cost: "RWF 10.0000" });
     });
 
     it("on the local chain, live SMS goes only to SMS_ALLOWLIST numbers (demo numbers may be real people)", async () => {
@@ -245,7 +258,7 @@ describe("Notifications (SMS outbox + notifier)", function () {
       box = createOutbox({ db, localChain: true, logFile: null, quiet: true });
       await box.sendNow(ALINE, "not listed");
       expect(requests).to.have.length(0);
-      expect(db.prepare("SELECT status FROM sms_outbox").all().map((r) => r.status)).to.deep.equal(["skipped", "skipped"]);
+      expect((await db.all("SELECT status FROM sms_outbox")).map((r) => r.status)).to.deep.equal(["skipped", "skipped"]);
     });
 
     it("treats insufficient balance and gateway errors as temporary, an invalid number as permanent", async () => {
@@ -255,7 +268,7 @@ describe("Notifications (SMS outbox + notifier)", function () {
       await box.sendNow(ALINE, "a");
       reply = { http: 201, body: { SMSMessageData: { Recipients: [{ statusCode: 403, status: "InvalidPhoneNumber" }] } } };
       await box.sendNow(JEAN, "b");
-      expect(db.prepare("SELECT phone, status, error FROM sms_outbox ORDER BY id").all()).to.deep.equal([
+      expect((await db.all("SELECT phone, status, error FROM sms_outbox ORDER BY id"))).to.deep.equal([
         { phone: ALINE, status: "queued", error: "405 InsufficientBalance" }, { phone: JEAN, status: "failed", error: "403 InvalidPhoneNumber" }]);
     });
   });
@@ -293,7 +306,7 @@ describe("Notifications (SMS outbox + notifier)", function () {
       const h = createHandler({ ussd, outbox: box, token: "t0ken", log: quiet });
       const r = await call(h, { url: "/sms/delivery?key=t0ken", headers: { "x-forwarded-for": "1.2.3.4" }, body: "id=ATXid_1&status=Success&phoneNumber=%2B250788000001" });
       expect(r.code).to.equal(200);
-      expect(db.prepare("SELECT status FROM sms_outbox").get().status).to.equal("delivered");
+      expect((await db.one("SELECT status FROM sms_outbox")).status).to.equal("delivered");
     });
   });
 });

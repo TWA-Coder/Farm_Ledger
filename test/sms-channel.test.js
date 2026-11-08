@@ -32,7 +32,7 @@ describe("SMS menu channel (Android SMS gateway)", function () {
   beforeEach(async () => {
     ctx = await loadFixture(farmerFixture);
     await ctx.ledger.grantRole(await ctx.ledger.CLAIMS_AGENT_ROLE(), ctx.outsider.address);
-    db = dbm.open(":memory:");
+    db = dbm.openIsolated();
     out = []; clock = Date.now(); n = 0;
     const abi = { ledger: (await artifacts.readArtifact("FarmLedger")).abi, token: (await artifacts.readArtifact("MockRWF")).abi };
     const ussd = createUssd({ provider: ethers.provider, abi, ledgerAddress: ctx.ledgerAddr, agent: ctx.outsider, db });
@@ -43,16 +43,16 @@ describe("SMS menu channel (Android SMS gateway)", function () {
 
   it("runs the same menu as USSD, one SMS per answer, and replies to the sender", async () => {
     let r = await text("FL");
-    expect(r).to.deep.equal({ phone: ALINE, text: "Choose a 4-digit PIN to protect your claims:" });
+    expect(r).to.deep.equal({ phone: ALINE, text: "Choose a 4-digit PIN to protect your claims:\n0. Ikinyarwanda" });
     expect((await text("1234")).text).to.equal("Repeat your PIN:");
-    expect((await text("1234")).text).to.equal("PIN saved.\nFarmLedger\n1. My policies\n2. Report a claim\n3. Claim status");
+    expect((await text("1234")).text).to.equal("PIN saved.\nFarmLedger\n1. My policies\n2. Report a claim\n3. Claim status\n0. Ikinyarwanda");
     await buyFor(ctx.ledger, ctx.farmer, 1, 1, 100_000);
     r = await text("1");
     expect(r.text).to.match(/^Your policies:\n1\. #1 Drought Active$/);
     r = await text("1");
     expect(r.text).to.match(/^Policy #1 Drought\n[\s\S]*Cover 100,000 RWF[\s\S]*Text FL for the menu\.$/); // END closes the session
     expect((await text("hello")).text).to.match(/^FarmLedger\n1\. My policies/); // anything after the end starts again
-    expect(db.prepare("SELECT COUNT(*) n FROM sms_outbox WHERE kind = 'sms-menu' AND via = 'smsgate'").get().n).to.equal(6);
+    expect((await db.one("SELECT COUNT(*) n FROM sms_outbox WHERE kind = 'sms-menu' AND via = 'smsgate'")).n).to.equal(6);
   });
 
   it("FL restarts at any time, and a conversation silent for 10 minutes starts over", async () => {
@@ -90,7 +90,7 @@ describe("SMS menu channel (Android SMS gateway)", function () {
   it("records the gateway's delivery reports", async () => {
     await text("FL");
     await webhook({ id: "d1", event: "sms:delivered", payload: { messageId: "gw-1" } });
-    expect(db.prepare("SELECT status FROM sms_outbox WHERE provider_id = 'gw-1'").get().status).to.equal("delivered");
+    expect((await db.one("SELECT status FROM sms_outbox WHERE provider_id = 'gw-1'")).status).to.equal("delivered");
   });
 
   describe("gateway send API (against a local fake of the phone's server)", function () {
@@ -120,7 +120,7 @@ describe("SMS menu channel (Android SMS gateway)", function () {
       expect(reqs[0].url).to.equal("/message");
       expect(reqs[0].auth).to.equal("Basic " + Buffer.from("sms:pw").toString("base64"));
       expect(reqs[0].body).to.deep.equal({ textMessage: { text: "hello" }, phoneNumbers: ["+250788000001"], withDeliveryReport: true });
-      expect(db.prepare("SELECT status, provider_id FROM sms_outbox").get()).to.deep.equal({ status: "sent", provider_id: "gw-abc" });
+      expect((await db.one("SELECT status, provider_id FROM sms_outbox"))).to.deep.equal({ status: "sent", provider_id: "gw-abc" });
     });
 
     it("still applies the allowlist on the local chain (the gateway phone pays for every SMS)", async () => {

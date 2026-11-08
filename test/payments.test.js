@@ -56,7 +56,7 @@ describe("Mobile Money (phone accounts, USSD, contracts drafted by the underwrit
   beforeEach(async () => {
     ctx = await loadFixture(fixture);
     abi = { ledger: (await artifacts.readArtifact("FarmLedger")).abi, token: (await artifacts.readArtifact("MockRWF")).abi, policyDesk: (await artifacts.readArtifact("PolicyDesk")).abi };
-    db = dbm.open(":memory:");
+    db = dbm.openIsolated();
     sms = []; clock = Date.now();
     const deskAddress = await ctx.desk.getAddress();
     accounts = createPhoneAccounts({ db, provider: ethers.provider, aa: ctx.aa, ledgerAddress: ctx.ledgerAddr, deskAddress, abi, secret: crypto.randomBytes(32),
@@ -74,10 +74,11 @@ describe("Mobile Money (phone accounts, USSD, contracts drafted by the underwrit
     for (let k = 0; k <= inputs.length; k++) reply = await u.handle({ sessionId, phoneNumber: "+" + phone, text: inputs.slice(0, k).join("*") });
     return reply;
   }
-  const account = () => accounts.accountOf(PHONE).account;
+  const account = async () => (await accounts.accountOf(PHONE)).account;
   async function settle(steps = 6) { for (let i = 0; i < steps; i++) { clock += DELAY; await payments.tick(); } }
   // the agent records the plot and applies; the underwriter drafts: application #n, offered
-  async function offered(holder = account(), sum = 200_000) {
+  async function offered(holder = null, sum = 200_000) {
+    holder = holder || (await account());
     const plotTx = await (await ctx.desk.connect(ctx.agent).registerPlotFor(holder, -2_150_000, 30_150_000, 5000, b32("MAIZE"), ethers.id("g"))).wait();
     const plotId = Number(plotTx.logs.map((l) => { try { return ctx.ledger.interface.parseLog(l); } catch { return null; } }).find((x) => x && x.name === "PlotRegistered").args.plotId);
     await ctx.desk.connect(ctx.agent).submitApplication(holder, 1, plotId, sum, 0, 0, 120, ethers.id("form"));
@@ -87,9 +88,9 @@ describe("Mobile Money (phone accounts, USSD, contracts drafted by the underwrit
   }
 
   it("registration with a district assigns the agent; the menu offers My offers and My agent", async () => {
-    expect(await ctx.desk.agentOf(account())).to.equal(ctx.agent.address);
-    expect(await ctx.desk.districtOf(account())).to.equal(b32("BUGESERA"));
-    expect(await dial([])).to.equal("CON FarmLedger\n1. My policies\n2. Report a claim\n3. Claim status\n4. Reset PIN\n6. My offers\n7. My agent");
+    expect(await ctx.desk.agentOf((await account()))).to.equal(ctx.agent.address);
+    expect(await ctx.desk.districtOf((await account()))).to.equal(b32("BUGESERA"));
+    expect(await dial([])).to.equal("CON FarmLedger\n1. My policies\n2. Report a claim\n3. Claim status\n4. Reset PIN\n6. My offers\n7. My agent\n0. Ikinyarwanda");
     require("../web/server/contacts").put(ctx.agent.address, "250788000015", db);
     expect(await dial(["7"])).to.equal("END Your FarmLedger agent can be reached on +250788000015. They collect your details and apply for cover for you.");
     expect(await dial(["6"])).to.match(/^END You have no contract to review/);
@@ -104,7 +105,7 @@ describe("Mobile Money (phone accounts, USSD, contracts drafted by the underwrit
     await dial(["1", "1199580011112222", "Uwase Diane", "4", "1", "1"], N);
     const code = /code: (\d{6})/.exec(sms.filter((m) => m.phone === N).at(-1).text)[1];
     await dial([code], N);
-    expect(await ctx.desk.agentOf(accounts.accountOf(N).account)).to.equal(ctx.agent.address);
+    expect(await ctx.desk.agentOf((await accounts.accountOf(N)).account)).to.equal(ctx.agent.address);
   });
 
   it("the farmer reviews the drafted contract and pays by MoMo; the policy is issued with the subsidy", async () => {
@@ -112,20 +113,20 @@ describe("Mobile Money (phone accounts, USSD, contracts drafted by the underwrit
     expect(await dial(["6"])).to.equal(`CON Contracts to review:\n1. #${id} Drought 200,000 RWF`);
     expect(await dial(["6", "1"])).to.match(new RegExp(`^CON Contract #${id}: Drought, cover 200,000 RWF, 120 days from payment\.\nPremium 20,000, subsidy -8,000\. You pay 12,000\.\nValid to \\d{2}/\\d{2}/\\d{4}\n1\. Pay by MoMo\n2\. Decline$`));
     expect(await dial(["6", "1", "1", PIN])).to.equal("END Approve the MoMo payment of 12,000 RWF on your phone. Your policy is issued once it is paid; we will SMS you.");
-    const [p] = payments.list();
+    const [p] = (await payments.list());
     expect(p).to.deep.include({ kind: "premium", amount: 12_000, status: "pending" });
     await dial(["6", "1", "1", PIN]); // paying again while the first is pending does not charge twice
-    expect(payments.list()).to.have.length(1);
+    expect((await payments.list())).to.have.length(1);
     const uwBefore = await ctx.ledger.poolBalance(ctx.underwriter.address);
     await settle();
-    const done = payments.row(p.ref);
+    const done = (await payments.row(p.ref));
     expect(done.status).to.equal("fulfilled");
     expect((await ctx.desk.getApplication(id)).status).to.equal(5); // Issued
     const pol = await ctx.ledger.getPolicy(done.policy_id);
-    expect(pol.holder).to.equal(account());
+    expect(pol.holder).to.equal((await account()));
     expect(await ctx.ledger.applicationHashOf(done.policy_id)).to.equal(ethers.id("contract"));
     expect(await ctx.ledger.subsidyOf(done.policy_id)).to.equal(8_000n);
-    expect(await ctx.token.balanceOf(account())).to.equal(0n);
+    expect(await ctx.token.balanceOf((await account()))).to.equal(0n);
     expect((await ctx.ledger.poolBalance(ctx.underwriter.address)) - uwBefore).to.equal(20_000n);
     expect(await dial(["6"])).to.match(/no contract to review/);
   });
@@ -134,7 +135,7 @@ describe("Mobile Money (phone accounts, USSD, contracts drafted by the underwrit
     await offered();
     process.env.MOMO_SIM_FAIL = PHONE;
     try { await dial(["6", "1", "1", PIN]); await settle(); } finally { delete process.env.MOMO_SIM_FAIL; }
-    expect(payments.list()[0]).to.deep.include({ status: "failed", reason: "PAYER_DECLINED" });
+    expect((await payments.list())[0]).to.deep.include({ status: "failed", reason: "PAYER_DECLINED" });
     expect(await ctx.ledger.policyCount()).to.equal(0n);
     expect(sms.at(-1).text).to.match(/was not completed \(PAYER_DECLINED\)/);
   });
@@ -144,10 +145,10 @@ describe("Mobile Money (phone accounts, USSD, contracts drafted by the underwrit
     await dial(["6", "1", "1", PIN]);
     await ctx.desk.connect(ctx.underwriter).rejectApplication(id, ethers.id("reasons"));
     await settle(8);
-    const [refund, premium] = payments.list();
+    const [refund, premium] = (await payments.list());
     expect(premium).to.deep.include({ kind: "premium", status: "refunded" });
     expect(refund).to.deep.include({ kind: "refund", status: "paid", amount: 12_000 });
-    expect(await ctx.token.balanceOf(account())).to.equal(0n);
+    expect(await ctx.token.balanceOf((await account()))).to.equal(0n);
     expect(sms.map((m) => m.text)).to.include("FarmLedger: 12,000 RWF refunded to your Mobile Money.");
   });
 
@@ -161,28 +162,28 @@ describe("Mobile Money (phone accounts, USSD, contracts drafted by the underwrit
   it("a farmer with their own wallet sees the contract on USSD and accepts it on the website", async () => {
     await offered(ctx.farmer.address);
     await dial([PIN, PIN], "250788000001");
-    expect(await dial(["6", "1"], "250788000001")).to.match(/You pay 12,000\.[\s\S]*Accept and pay on the FarmLedger website\.$/);
+    expect(await dial(["6", "1"], "250788000001")).to.match(/You pay 12,000\.[\s\S]*Accept and pay on the website\.$/);
   });
 
   it("a payout to a phone account is swept to the treasury and sent to the farmer's MoMo, exactly once", async () => {
     await offered();
     await dial(["6", "1", "1", PIN]);
     await settle();
-    const { policy_id: policyId } = payments.list()[0];
+    const { policy_id: policyId } = (await payments.list())[0];
     const plotId = Number((await ctx.ledger.getPolicy(policyId)).assetId);
     const tx = await ctx.ledger.connect(ctx.oracle).postReading(plotId, Metric.Rainfall, 800, await time.latest());
-    expect(await ctx.token.balanceOf(account())).to.equal(200_000n);
-    const ref = payments.startPayout({ holder: account(), amount: 200_000n, policyId, txHash: tx.hash });
-    expect(payments.startPayout({ holder: account(), amount: 200_000n, policyId, txHash: tx.hash })).to.equal(null);
+    expect(await ctx.token.balanceOf((await account()))).to.equal(200_000n);
+    const ref = (await payments.startPayout({ holder: (await account()), amount: 200_000n, policyId, txHash: tx.hash }));
+    expect((await payments.startPayout({ holder: (await account()), amount: 200_000n, policyId, txHash: tx.hash }))).to.equal(null);
     await settle();
-    expect(payments.row(ref)).to.deep.include({ kind: "payout", status: "paid", amount: 200_000 });
-    expect(await ctx.token.balanceOf(account())).to.equal(0n);
+    expect((await payments.row(ref))).to.deep.include({ kind: "payout", status: "paid", amount: 200_000 });
+    expect(await ctx.token.balanceOf((await account()))).to.equal(0n);
     expect(await ctx.token.balanceOf(ctx.treasury.address)).to.equal(200_000n);
     expect(sms.at(-1).text).to.equal(`FarmLedger: 200,000 RWF sent to your MTN Mobile Money for policy #${policyId}.`);
   });
 
   it("farmers with their own wallet keep payouts as tokens (no MoMo transfer)", async () => {
-    expect(payments.startPayout({ holder: ctx.farmer.address, amount: 1n, policyId: 1, txHash: "0xabc" })).to.equal(null);
+    expect((await payments.startPayout({ holder: ctx.farmer.address, amount: 1n, policyId: 1, txHash: "0xabc" }))).to.equal(null);
   });
 });
 

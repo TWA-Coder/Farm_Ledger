@@ -22,7 +22,7 @@ describe("USSD channel (monitoring and claim registration only)", function () {
       ledger: (await artifacts.readArtifact("FarmLedger")).abi,
       token: (await artifacts.readArtifact("MockRWF")).abi,
     };
-    db = dbm.open(":memory:");
+    db = dbm.openIsolated();
     return createUssd({ provider: ethers.provider, abi, ledgerAddress: base.ledgerAddr, agent, db });
   }
 
@@ -61,7 +61,7 @@ describe("USSD channel (monitoring and claim registration only)", function () {
     it("asks a registered farmer to choose a PIN on first use, then shows exactly three options", async () => {
       expect(await dial(ALINE, [])).to.match(/^CON Choose a 4-digit PIN/);
       const menu = await withPin(ALINE);
-      expect(menu).to.equal("CON PIN saved.\nFarmLedger\n1. My policies\n2. Report a claim\n3. Claim status");
+      expect(menu).to.equal("CON PIN saved.\nFarmLedger\n1. My policies\n2. Report a claim\n3. Claim status\n0. Ikinyarwanda");
     });
 
     it("never offers registering, buying, adding assets, topping up or checking a balance", async () => {
@@ -72,7 +72,7 @@ describe("USSD channel (monitoring and claim registration only)", function () {
 
     it("rejects unknown menu choices, including the old buy/add/balance numbers", async () => {
       await withPin(ALINE);
-      for (const c of ["4", "5", "0", "9", "buy"]) expect(await dial(ALINE, [c])).to.equal("END Invalid choice.");
+      for (const c of ["4", "5", "8", "9", "buy"]) expect(await dial(ALINE, [c])).to.equal("END Invalid choice.");
     });
   });
 
@@ -221,6 +221,45 @@ describe("USSD channel (monitoring and claim registration only)", function () {
       await dial(ALINE, ["2", "1", "1", PIN]);
       await withPin(JEAN);
       expect(await dial(JEAN, ["3"])).to.equal("END You have no claims.");
+    });
+  });
+
+  describe("language (English / Kinyarwanda)", function () {
+    it("offers Kinyarwanda on the PIN setup screen and keeps it for the rest of the session", async () => {
+      expect(await dial(ALINE, [])).to.equal("CON Choose a 4-digit PIN to protect your claims:\n0. Ikinyarwanda");
+      expect(await dial(ALINE, ["0"])).to.equal("CON Hitamo PIN y'imibare 4 irinda ubusabe bwawe:\n0. English");
+      // the choice is saved at once: the next call starts in Kinyarwanda (and "0" there would switch back to English)
+      expect(await dial(ALINE, [PIN])).to.equal("CON Ongera wandike PIN yawe:");
+      expect(await dial(ALINE, [PIN, PIN])).to.match(/^CON PIN yabitswe\.\nFarmLedger\n1\. Ubwishingizi bwanjye/);
+    });
+
+    it("switches from the main menu with 0, remembers it on the next call, and switches back", async () => {
+      await withPin(ALINE);
+      expect(await dial(ALINE, ["0"])).to.equal("CON FarmLedger\n1. Ubwishingizi bwanjye\n2. Saba indishyi\n3. Ubusabe bwanjye\n0. English");
+      expect(await dial(ALINE, [])).to.match(/^CON FarmLedger\n1\. Ubwishingizi bwanjye/); // new session, same language
+      expect(await dial(ALINE, ["1"])).to.match(/^END Nta bwishingizi ufite/);
+      expect(await dial(ALINE, ["9"])).to.equal("END Ihitamo ritemewe.");
+      expect(await dial(ALINE, ["0"])).to.equal("CON FarmLedger\n1. My policies\n2. Report a claim\n3. Claim status\n0. Ikinyarwanda");
+      expect(await dial(ALINE, ["1"])).to.match(/^END You have no policies/);
+    });
+
+    it("the choice belongs to the phone number, not to everyone", async () => {
+      await withPin(ALINE); await withPin(JEAN);
+      await dial(ALINE, ["0"]);
+      expect(await dial(JEAN, [])).to.match(/^CON FarmLedger\n1\. My policies/);
+    });
+
+    it("answers in Kinyarwanda through a whole claim, within the USSD limit", async () => {
+      await buyCattle(); await withPin(ALINE);
+      await dial(ALINE, ["0"]);
+      await time.increase(8 * DAY);
+      seen = [];
+      for (const a of [[], ["1"], ["1", "1"], ["2"], ["2", "1"], ["2", "1", "2"]]) await dial(ALINE, a);
+      expect(await dial(ALINE, ["2", "1", "1", PIN])).to.match(/^END Ubusabe #\d+ bwakiriwe\./);
+      expect(await dial(ALINE, ["3"])).to.match(/^CON Ubusabe bwawe:\n1\. #\d+ .* Bitegereje abaganga/);
+      expect(await dial(ALINE, ["3", "1"])).to.match(/Uko bihagaze: bitegereje abaganga/);
+      for (const s of seen) expect(s.length, s).to.be.at.most(182);
+      expect(seen.join("\n")).to.not.match(/My policies|Report a claim|Invalid choice|Status:/);
     });
   });
 

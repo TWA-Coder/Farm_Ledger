@@ -59,7 +59,7 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
   beforeEach(async () => {
     ctx = await loadFixture(fixture);
     abi = { ledger: (await artifacts.readArtifact("FarmLedger")).abi, token: (await artifacts.readArtifact("MockRWF")).abi };
-    db = dbm.open(":memory:");
+    db = dbm.openIsolated();
     sms = [];
     clock = Date.now();
     secret = crypto.randomBytes(32);
@@ -76,12 +76,12 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
   async function registerByUssd(phone = NEW, nid = NID) {
     expect(await dial(phone, ["1", nid, NAME, "1"])).to.match(/^END We sent you a 6-digit code/);
     expect(await dial(phone, [lastCode(phone), PIN, PIN])).to.match(/^CON PIN saved\./);
-    return accounts.accountOf(phone).account;
+    return (await accounts.accountOf(phone)).account;
   }
 
   describe("registration from a basic phone", function () {
     it("a new number registers with its National ID and an SMS code, then sets a PIN; the farmer pays no fees", async () => {
-      expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number");
+      expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number\n0. Ikinyarwanda");
       expect(await dial(NEW, ["1"])).to.match(/National ID/);
       expect(await dial(NEW, ["1", NID])).to.equal("CON Enter your full name, as on your ID:");
       expect(await dial(NEW, ["1", NID, NAME])).to.equal(`CON Register ${NAME}, ID ending 5678 with this number?\n1. Yes\n2. No`);
@@ -92,7 +92,7 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
 
       expect(await dial(NEW, [])).to.equal("CON Enter the 6-digit code from the SMS:\n0. Send a new code");
       expect(await dial(NEW, [lastCode(NEW)])).to.equal("CON Registered! Your FarmLedger account is ready.\nChoose a 4-digit PIN to protect it:");
-      const { account, status } = accounts.accountOf(NEW);
+      const { account, status } = (await accounts.accountOf(NEW));
       expect(status).to.equal("active");
 
       const f = await ctx.ledger.getFarmer(account);
@@ -101,29 +101,29 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
       expect(f.phoneHash).to.equal(hash(NEW));
       expect(await ethers.provider.getCode(account)).to.not.equal("0x"); // the smart account was deployed by that operation
       expect(await ethers.provider.getBalance(account)).to.equal(0n);
-      expect(contacts.read(db)[account.toLowerCase()].phone).to.equal(NEW); // payout SMS will find the number
-      expect(profiles.get(account, db)).to.equal(NAME); // the name, off-chain only
+      expect((await contacts.read(db))[account.toLowerCase()].phone).to.equal(NEW); // payout SMS will find the number
+      expect((await profiles.get(account, db))).to.equal(NAME); // the name, off-chain only
       expect(f.toArray().map(String).join(" ")).to.not.include(NAME);
 
       // PIN, then the full menu with account services
       expect(await dial(NEW, [PIN])).to.equal("CON Repeat your PIN:");
-      expect(await dial(NEW, [PIN, PIN])).to.equal("CON PIN saved.\nFarmLedger\n1. My policies\n2. Report a claim\n3. Claim status\n4. Reset PIN");
+      expect(await dial(NEW, [PIN, PIN])).to.equal("CON PIN saved.\nFarmLedger\n1. My policies\n2. Report a claim\n3. Claim status\n4. Reset PIN\n0. Ikinyarwanda");
     });
 
     it("the owner key is stored encrypted and bound to its account; the wrong secret cannot open it", async () => {
       const account = await registerByUssd();
-      const row = db.prepare("SELECT * FROM phone_accounts WHERE phone = ?").get(NEW);
+      const row = (await db.one("SELECT * FROM phone_accounts WHERE phone = ?", [NEW]));
       const enc = JSON.parse(row.enc_key);
       expect(Object.keys(enc).sort()).to.deep.equal(["ct", "iv", "tag", "v"]);
       // a signer from the stored key controls exactly this account
-      expect(await accounts.signerFor(NEW).getAddress()).to.equal(account);
-      expect(accounts.signerFor(NEW).owner.address).to.equal(row.owner);
+      expect(await (await accounts.signerFor(NEW)).getAddress()).to.equal(account);
+      expect((await accounts.signerFor(NEW)).owner.address).to.equal(row.owner);
 
       build({ key: crypto.randomBytes(32) }); // same database, different secret
-      expect(() => accounts.signerFor(NEW)).to.throw();
+      await expect(accounts.signerFor(NEW)).to.be.rejected;
       build();
-      db.prepare("UPDATE phone_accounts SET account = ? WHERE phone = ?").run(ethers.Wallet.createRandom().address, NEW); // row moved to another account
-      expect(() => accounts.signerFor(NEW)).to.throw();
+      (await db.run("UPDATE phone_accounts SET account = ? WHERE phone = ?", [ethers.Wallet.createRandom().address, NEW])); // row moved to another account
+      await expect(accounts.signerFor(NEW)).to.be.rejected;
     });
 
     it("refuses a malformed or already registered National ID before sending any SMS", async () => {
@@ -140,7 +140,7 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
       const bad = good === "000000" ? "111111" : "000000";
       for (let i = 1; i < CODE_TRIES; i++) expect(await dial(NEW, [bad])).to.equal(`END Wrong code. ${CODE_TRIES - i} tries left. Dial again.`);
       expect(await dial(NEW, [bad])).to.match(/no longer works/);
-      expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number");
+      expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number\n0. Ikinyarwanda");
 
       expect(await dial(NEW, ["1", NID, NAME, "1"])).to.match(/Wait \d+ seconds/); // resend throttle, even for a voided code
       clock += 61_000;
@@ -156,7 +156,7 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
       clock += 61_000;
       expect(await dial(NEW, ["0"])).to.equal("END Too many codes today. Try again tomorrow.");
       expect(sms).to.have.length(5);
-      expect(accounts.accountOf(NEW)).to.equal(null);
+      expect((await accounts.accountOf(NEW))).to.equal(null);
       expect(await dial(NEW, [lastCode(NEW), PIN, PIN])).to.match(/^CON PIN saved/); // the last code still works
     });
 
@@ -167,12 +167,12 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
       });
       u = createUssd({ provider: ethers.provider, abi, ledgerAddress: ctx.ledgerAddr, agent: ctx.agent, accounts, db });
       expect(await dial(NEW, ["1", NID, NAME, "1"])).to.equal("END We could not send the SMS code to this number right now. Please try again later.");
-      expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number");
+      expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number\n0. Ikinyarwanda");
     });
 
     it("a registration that fails on-chain leaves no key behind", async () => {
       await expect(accounts.register(NEW, hash("1199080012345678"))).to.be.rejected; // Aline's ID: IdAlreadyUsed
-      expect(accounts.accountOf(NEW)).to.equal(null);
+      expect((await accounts.accountOf(NEW))).to.equal(null);
     });
   });
 
@@ -210,15 +210,15 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
       for (const m of sms) expect(m.text.length, m.text).to.be.at.most(160); // one SMS each, even with a long shortcode
 
 
-      expect(await dial(NEW, [])).to.match(/5\. Cancel number change$/); // the old number can still cancel
+      expect(await dial(NEW, [])).to.match(/5\. Cancel number change\n0\. Ikinyarwanda$/); // the old number can still cancel
       expect(await dial(OTHER, [])).to.match(/^END Your number change is waiting/);
 
       clock += 48 * HOUR + 1;
       expect(await dial(OTHER, [])).to.equal("CON Your account is now on this number.\nChoose a 4-digit PIN to protect it:");
-      expect(accounts.accountOf(OTHER).account).to.equal(account);
-      expect(accounts.accountOf(NEW)).to.equal(null);
+      expect((await accounts.accountOf(OTHER)).account).to.equal(account);
+      expect((await accounts.accountOf(NEW))).to.equal(null);
       expect((await ctx.ledger.getFarmer(account)).phoneHash).to.equal(hash(OTHER)); // updatePhone from the account itself
-      expect(contacts.read(db)[account.toLowerCase()].phone).to.equal(OTHER);
+      expect((await contacts.read(db))[account.toLowerCase()].phone).to.equal(OTHER);
 
       expect(await dial(OTHER, [PIN, PIN])).to.match(/^CON PIN saved\.\nFarmLedger/);
       expect(await dial(NEW, [])).to.match(/^CON Welcome to FarmLedger/); // the old SIM no longer reaches the account
@@ -250,15 +250,15 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
     it("the operator can release a request early; with no waiting period the move completes at once", async () => {
       const account = await registerByUssd();
       await requestMove();
-      const [q] = accounts.requests("waiting");
-      expect(accounts.releaseNow(q.id)).to.equal(true);
+      const [q] = (await accounts.requests("waiting"));
+      expect((await accounts.releaseNow(q.id))).to.equal(true);
       expect(await dial(OTHER, [])).to.match(/^CON Your account is now on this number/);
 
       build({ delayMs: 0 });
       clock += 2 * 60_000;
       await dial(NEW, ["2", "0788000600", NID]); // and back again, instantly
       expect(await dial(NEW, [lastCode(NEW)])).to.match(/^CON Your account is now on this number/);
-      expect(accounts.accountOf(NEW).account).to.equal(account);
+      expect((await accounts.accountOf(NEW)).account).to.equal(account);
     });
   });
 });
