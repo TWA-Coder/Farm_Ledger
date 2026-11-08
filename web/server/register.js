@@ -45,7 +45,7 @@ async function idTaken(idHash) {
   const indexer = require("./indexer");
   const chain = require("./chain");
   await indexer.sync({ provider, ledger, others: [chain.cropClaims(), chain.policyDesk()].filter(Boolean), startBlock: chain.deployment().deployBlock });
-  return indexer.events(undefined, { name: "FarmerRegistered" }).some((e) => String(e.args.idHash).toLowerCase() === idHash.toLowerCase());
+  return (await indexer.events(undefined, { name: "FarmerRegistered" })).some((e) => String(e.args.idHash).toLowerCase() === idHash.toLowerCase());
 }
 
 async function start({ name, nid, phone: phoneInput, district }) {
@@ -58,7 +58,7 @@ async function start({ name, nid, phone: phoneInput, district }) {
   const { DISTRICTS } = require("../shared/districts");
   const d = DISTRICTS.find((x) => x.toLowerCase() === String(district || "").toLowerCase());
   if (!d) fail(400, "Choose the district of your farm.");
-  const acc = accounts.accountOf(phone);
+  const acc = await accounts.accountOf(phone);
   if (acc && acc.status === "active") fail(409, "This number already has a FarmLedger account. Sign in with your phone number and PIN.");
   if (await idTaken(hashOf(id))) fail(409, "This National ID is already registered. If you changed your number, dial the USSD code and choose 2.");
   shown.delete(phone);
@@ -72,17 +72,17 @@ async function finish({ phone: phoneInput, code, pin }) {
   const phone = auth.normalizePhone(phoneInput);
   if (!/^\d{4}$/.test(String(pin || ""))) fail(400, "Choose a 4-digit PIN.");
   if (["0000", "1234", "1111"].includes(String(pin))) fail(400, "That PIN is too easy to guess. Choose another one.");
-  if (!accounts.verifiedCode(phone, "register")) {
-    const c = accounts.checkCode(phone, "register", String(code || "").trim());
+  if (!(await accounts.verifiedCode(phone, "register"))) {
+    const c = await accounts.checkCode(phone, "register", String(code || "").trim());
     if (!c.ok) fail(400, c.left > 0 ? `Wrong code. ${c.left} tries left.` : "That code no longer works. Start again to get a new one.");
   }
-  const { data } = accounts.verifiedCode(phone, "register");
+  const { data } = await accounts.verifiedCode(phone, "register");
   const { account } = await accounts.register(phone, data.idHash, data.district || null);
-  accounts.clearCode(phone, "register");
+  await accounts.clearCode(phone, "register");
   const db = dbm.get();
-  if (data.name) profiles.put(account, data.name, db);
-  require("../../services/pins").createPinStore({ db }).setPin(phone, String(pin));
-  return { phone, account, token: auth.createSession("farmer", phone, db) };
+  if (data.name) await profiles.put(account, data.name, db);
+  await require("../../services/pins").createPinStore({ db }).setPin(phone, String(pin));
+  return { phone, account, token: await auth.createSession("farmer", phone, db) };
 }
 
 module.exports = { start, finish };

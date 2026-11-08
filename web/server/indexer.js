@@ -19,7 +19,8 @@
 // provider does not confirm.
 //
 // Callers: the portal's /api/events route (synchronises on each request, so screens are never behind) and, later,
-// the notifier. Several processes may run sync() at once: inserts are idempotent (block, log_index).
+// the notifier. Several processes may run sync() at once: inserts are idempotent (block, log_index), and each write
+// takes a transaction-level advisory lock and never moves the cursor backwards.
 const { encodeArgs, reviveArgs } = require("../shared/event-json");
 const dbm = require("./db");
 
@@ -50,17 +51,20 @@ async function readLogs(provider, scan, addresses, from, to) {
 }
 const CONFIRMATIONS = Number(process.env.INDEXER_CONFIRMATIONS || 0); // set e.g. 3 on a public network
 
+const INDEX_LOCK = 724_310_002; // advisory lock id for index writes
+
 function reset(db, identity) {
-  dbm.tx(db, () => {
+  return db.tx(async (t) => {
+    await t.one(`SELECT pg_advisory_xact_lock(${INDEX_LOCK})`);
     // Only events are cleared. Readings are keyed by transaction hash, so old ones can never match a new transaction,
     // and the oracle may already have logged a reading from the new chain before this reset ran.
-    db.exec("DELETE FROM events;");
-    dbm.setMeta(db, "indexer_identity", identity);
+    await t.run("DELETE FROM events");
+    await dbm.setMeta(t, "indexer_identity", identity);
     // bumped on every rebuild: a redeployed local chain reuses the same addresses, so the identity alone cannot tell
     // the notifier that its cursor belongs to an old chain
-    dbm.setMeta(db, "indexer_epoch", Number(dbm.getMeta(db, "indexer_epoch") || 0) + 1);
-    dbm.setMeta(db, "indexer_block", -1);
-    dbm.setMeta(db, "indexer_block_hash", "");
+    await dbm.setMeta(t, "indexer_epoch", Number((await dbm.getMeta(t, "indexer_epoch")) || 0) + 1);
+    await dbm.setMeta(t, "indexer_block", -1);
+    await dbm.setMeta(t, "indexer_block_hash", "");
   });
 }
 
@@ -83,32 +87,35 @@ async function doSync(db, provider, contracts, startBlock) {
   const scan = scanProvider();
   if (scan && (await scan.getNetwork()).chainId !== chainId) throw new Error("INDEXER_RPC_URL is on a different chain than RPC_URL");
   const identity = `${chainId}:${addresses.join(",")}`; // adding a contract rebuilds the index so its history is read
-  if (dbm.getMeta(db, "indexer_identity") !== identity) reset(db, identity);
+  if ((await dbm.getMeta(db, "indexer_identity")) !== identity) await reset(db, identity);
 
   const head = await provider.getBlockNumber();
-  let cursor = Number(dbm.getMeta(db, "indexer_block") ?? -1);
+  let cursor = Number((await dbm.getMeta(db, "indexer_block")) ?? -1);
   if (cursor >= 0) {
     const b = cursor <= head ? await provider.getBlock(cursor) : null;
-    if (!b || b.hash !== dbm.getMeta(db, "indexer_block_hash")) { reset(db, identity); cursor = -1; }
+    if (!b || b.hash !== (await dbm.getMeta(db, "indexer_block_hash"))) { await reset(db, identity); cursor = -1; }
   }
 
   const target = head - CONFIRMATIONS;
-  const insert = db.prepare("INSERT OR IGNORE INTO events (block, log_index, tx, name, args) VALUES (?, ?, ?, ?, ?)");
   let added = 0;
   for (let from = Math.max(cursor + 1, startBlock); from <= target; from += CHUNK) {
     const to = Math.min(from + CHUNK - 1, target);
     const logs = await readLogs(provider, scan, addresses, from, to);
     const toHash = (await provider.getBlock(to)).hash;
-    dbm.tx(db, () => {
+    await db.tx(async (t) => {
+      await t.one(`SELECT pg_advisory_xact_lock(${INDEX_LOCK})`);
       for (const l of logs) {
         let parsed;
         const c = byAddress.get(l.address.toLowerCase());
         try { parsed = c && c.interface.parseLog(l); } catch { continue; }
         if (!parsed) continue;
-        added += Number(insert.run(l.blockNumber, l.index, l.transactionHash.toLowerCase(), parsed.name, JSON.stringify(encodeArgs(parsed.fragment, parsed.args))).changes);
+        added += (await t.run("INSERT INTO events (block, log_index, tx, name, args) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+          [l.blockNumber, l.index, l.transactionHash.toLowerCase(), parsed.name, JSON.stringify(encodeArgs(parsed.fragment, parsed.args))])).changes;
       }
-      dbm.setMeta(db, "indexer_block", to);
-      dbm.setMeta(db, "indexer_block_hash", toHash);
+      if (Number((await dbm.getMeta(t, "indexer_block")) ?? -1) < to) { // another process may already be further
+        await dbm.setMeta(t, "indexer_block", to);
+        await dbm.setMeta(t, "indexer_block_hash", toHash);
+      }
     });
   }
   return { block: Math.max(cursor, target), added };
@@ -116,11 +123,11 @@ async function doSync(db, provider, contracts, startBlock) {
 
 // Events in chain order. `raw` keeps the {"$big"} encoding (for sending as JSON); otherwise BigInts are revived.
 // `after` = {block, idx}: only events after that position (the notifier's cursor).
-function events(db = dbm.get(), { name = null, raw = false, after = null } = {}) {
+async function events(db = dbm.get(), { name = null, raw = false, after = null } = {}) {
   const where = [], params = [];
   if (name) { where.push("name = ?"); params.push(name); }
   if (after) { where.push("(block > ? OR (block = ? AND log_index > ?))"); params.push(after.block, after.block, after.idx); }
-  const rows = db.prepare(`SELECT * FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY block, log_index`).all(...params);
+  const rows = await db.all(`SELECT * FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY block, log_index`, params);
   return rows.map((r) => {
     const args = JSON.parse(r.args);
     return { name: r.name, args: raw ? args : reviveArgs(args), block: r.block, idx: r.log_index, tx: r.tx };

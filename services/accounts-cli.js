@@ -26,32 +26,32 @@ async function main() {
   const time = (ms) => (ms ? new Date(ms).toLocaleString("en-GB") : "-");
 
   if (cmd === "list") {
-    const rows = db.prepare("SELECT phone, account, status, created_at FROM phone_accounts ORDER BY created_at").all();
+    const rows = await db.all("SELECT phone, account, status, created_at FROM phone_accounts ORDER BY created_at");
     console.log(`Phone accounts (${rows.length})`);
     for (const r of rows) console.log(`  +${r.phone}  ${r.account}  ${r.status}  since ${r.created_at}`);
-    const reqs = accounts.requests();
+    const reqs = await accounts.requests();
     console.log(`Number changes (${reqs.length})`);
     for (const q of reqs) console.log(`  #${q.id}  +${q.old_phone} -> +${q.new_phone}  ${q.status}  ready ${time(q.ready_at)}${q.note ? `  (${q.note})` : ""}`);
   } else if (cmd === "cancel") {
     const by = oplog.operatorFrom(process.argv);
     const ok = await accounts.cancelMove(Number(arg), `operator ${by}`);
-    if (ok) oplog.record({ operator: by, command: "accounts cancel", target: `move #${arg}` });
+    if (ok) await oplog.record({ operator: by, command: "accounts cancel", target: `move #${arg}` });
     console.log(ok ? `Request #${arg} cancelled.` : `No waiting request #${arg}.`);
   } else if (cmd === "release") {
     const by = oplog.operatorFrom(process.argv);
     const agent = oplog.flag(process.argv, "--agent");
-    const q = accounts.requests("waiting").find((r) => r.id === Number(arg));
+    const q = (await accounts.requests("waiting")).find((r) => r.id === Number(arg));
     if (!q) { console.log(`No waiting request #${arg}.`); return; }
     if (!agent || !ethers.isAddress(agent)) throw new Error("Name the farmer's agent who checked the ID in person: --agent <address>.");
     if (!dep.policyDesk) throw new Error("PolicyDesk is not deployed: there is no agent to confirm the farmer's identity.");
     const desk = new ethers.Contract(dep.policyDesk, loadAbi().policyDesk, provider);
     const assigned = await desk.agentOf(q.account);
     if (assigned.toLowerCase() !== agent.toLowerCase()) throw new Error(`That is not this farmer's agent (on-chain: ${assigned}). Nothing was released.`);
-    accounts.releaseNow(q.id);
-    oplog.record({ operator: by, command: "accounts release", target: `move #${q.id}`, detail: `ID checked by agent ${agent}` });
+    await accounts.releaseNow(q.id);
+    await oplog.record({ operator: by, command: "accounts release", target: `move #${q.id}`, detail: `ID checked by agent ${agent}` });
     console.log(`Request #${q.id} released (ID checked by agent ${agent}). It completes when the farmer dials from the new number.`);
   } else if (cmd === "log") {
-    for (const r of oplog.recent()) console.log(`  ${r.at}  ${r.operator}  ${r.command}  ${r.target}${r.detail ? `  (${r.detail})` : ""}`);
+    for (const r of await oplog.recent()) console.log(`  ${r.at}  ${r.operator}  ${r.command}  ${r.target}${r.detail ? `  (${r.detail})` : ""}`);
   } else {
     console.log("Usage: npm run accounts [-- list | log | cancel <id> --by <name> | release <id> --agent <address> --by <name>]");
     process.exitCode = 1;

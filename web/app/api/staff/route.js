@@ -8,13 +8,13 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request) {
-  try { return http.json({ staff: auth.listStaff(auth.requireViewer(request)) }); } catch (e) { return http.fail(e); }
+  try { return http.json({ staff: await auth.listStaff(await auth.requireViewer(request)) }); } catch (e) { return http.fail(e); }
 }
 
 export async function POST(request) {
   try {
     auth.guard(request);
-    const viewer = auth.requireViewer(request);
+    const viewer = await auth.requireViewer(request);
     return http.json(await auth.createStaff(viewer, await request.json()));
   } catch (e) { return http.fail(e); }
 }

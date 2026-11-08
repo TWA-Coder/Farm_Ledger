@@ -29,7 +29,7 @@ export async function POST(request, { params }) {
     if (!rec || Number(rec.deskApplicationId) !== deskId || app.formHash !== rec.applicationHash) throw new core.DocError(409, "This record is not the submitted application.");
     if (app.underwriter.toLowerCase() !== who.toLowerCase() || !(await chain.isUnderwriter(who))) throw new core.DocError(403, "Only the underwriter of this application can decide on it.");
     const { hash } = http.store.putDecision({ applicant: b.applicant, application, kind: b.kind, content: b.content || {}, by: who });
-    http.logAccess({ viewer: who, role: "underwriter", applicant: b.applicant, application, document: b.kind, action: "decision" });
+    await http.logAccess({ viewer: who, role: "underwriter", applicant: b.applicant, application, document: b.kind, action: "decision" });
     return http.json({ hash });
   } catch (e) { return http.fail(e); }
 }

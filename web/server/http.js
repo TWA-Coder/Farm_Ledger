@@ -42,12 +42,10 @@ const chainDeps = () => {
   };
 };
 
-function logAccess(entry) {
+async function logAccess(entry) {
   try {
-    const db = require("./db").get();
-    db.exec("CREATE TABLE IF NOT EXISTS doc_access_log (at TEXT NOT NULL, viewer TEXT NOT NULL, role TEXT NOT NULL, applicant TEXT NOT NULL, application TEXT NOT NULL, document TEXT NOT NULL, action TEXT NOT NULL)");
-    db.prepare("INSERT INTO doc_access_log VALUES (?, ?, ?, ?, ?, ?, ?)").run(new Date().toISOString(), String(entry.viewer).toLowerCase(), entry.role,
-      String(entry.applicant).toLowerCase(), entry.application, entry.document || "-", entry.action);
+    await require("./db").get().run("INSERT INTO doc_access_log (at, viewer, role, applicant, application, document, action) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [new Date().toISOString(), String(entry.viewer).toLowerCase(), entry.role, String(entry.applicant).toLowerCase(), entry.application, entry.document || "-", entry.action]);
   } catch (e) { console.error("[access-log]", e.message); }
 }
 

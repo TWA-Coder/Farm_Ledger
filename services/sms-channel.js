@@ -36,19 +36,19 @@ function createSmsChannel({ db = dbm.get(), ussd, outbox, signingKey = process.e
   // One SMS in, one screen out. The session is the list of answers so far, like a USSD session's text.
   async function converse(phone, text) {
     const clean = String(text || "").replace(/[*#]/g, "").trim(); // "*" separates answers in the menu engine
-    const row = db.prepare("SELECT * FROM sms_sessions WHERE phone = ?").get(phone);
+    const row = await db.one("SELECT * FROM sms_sessions WHERE phone = ?", [phone]);
     const fresh = !row || now() - row.updated_at > SESSION_MS || START.test(clean);
     const sessionId = fresh ? "sms-" + crypto.randomBytes(6).toString("hex") : row.session_id;
     const inputs = fresh ? [] : [...JSON.parse(row.inputs), clean];
     const screen = await ussd.handle({ sessionId, phoneNumber: "+" + phone, text: inputs.join("*") });
     const body = screen.replace(/^(CON|END) /, "");
     if (screen.startsWith("END")) {
-      db.prepare("DELETE FROM sms_sessions WHERE phone = ?").run(phone);
+      await db.run("DELETE FROM sms_sessions WHERE phone = ?", [phone]);
       return `${body}\nText FL for the menu.`;
     }
-    db.prepare(`INSERT INTO sms_sessions (phone, session_id, inputs, updated_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT(phone) DO UPDATE SET session_id = excluded.session_id, inputs = excluded.inputs, updated_at = excluded.updated_at`)
-      .run(phone, sessionId, JSON.stringify(inputs), now());
+    await db.run(`INSERT INTO sms_sessions (phone, session_id, inputs, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT (phone) DO UPDATE SET session_id = excluded.session_id, inputs = excluded.inputs, updated_at = excluded.updated_at`,
+    [phone, sessionId, JSON.stringify(inputs), now()]);
     return body;
   }
 
@@ -66,17 +66,17 @@ function createSmsChannel({ db = dbm.get(), ussd, outbox, signingKey = process.e
       const id = String(msg.id || p.messageId || "");
       const phone = digits(p.sender);
       if (!id || !phone) return { status: 400, body: "missing id or sender" };
-      const fresh = db.prepare("INSERT OR IGNORE INTO sms_inbound (id, phone, text, received_at) VALUES (?, ?, ?, ?)")
-        .run(id, phone, String(p.message || "").slice(0, 500), now()).changes;
+      const fresh = (await db.run("INSERT INTO sms_inbound (id, phone, text, received_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+        [id, phone, String(p.message || "").slice(0, 500), now()])).changes;
       if (!fresh) return { status: 200, body: "duplicate" }; // the app retried a webhook we already handled
       const reply = await converse(phone, p.message);
-      db.prepare("UPDATE sms_inbound SET reply = ? WHERE id = ?").run(reply, id);
+      await db.run("UPDATE sms_inbound SET reply = ? WHERE id = ?", [reply, id]);
       await outbox.sendNow(phone, reply, { kind: "sms-menu", via: replyVia });
       return { status: 200, body: "ok" };
     }
     if (["sms:sent", "sms:delivered", "sms:failed"].includes(msg.event)) {
       const status = msg.event === "sms:delivered" ? "Delivered" : msg.event === "sms:failed" ? "Failed" : "Sent";
-      outbox.recordDelivery({ id: p.messageId || p.id, status, failureReason: p.reason || p.error || null });
+      await outbox.recordDelivery({ id: p.messageId || p.id, status, failureReason: p.reason || p.error || null });
       return { status: 200, body: "ok" };
     }
     return { status: 200, body: "ignored" }; // system:ping etc.

@@ -31,7 +31,7 @@ async function postFor(ctx, plotId, override) {
     const t0 = Date.now();
     const tx = await ledger.postReading(plotId, metric, value, observedAt);
     const rc = await tx.wait();
-    readingsLog.append({ tx: rc.hash, plotId: Number(plotId), metric, value, observedAt, source: readingsLog.sourceFor(adapter.name, metric), adapter: adapter.name });
+    await readingsLog.append({ tx: rc.hash, plotId: Number(plotId), metric, value, observedAt, source: readingsLog.sourceFor(adapter.name, metric), adapter: adapter.name });
     const paid = rc.logs.filter((l) => l.fragment && l.fragment.name === "PayoutExecuted").length;
     console.log(`[${adapter.name}] plot ${plotId} ${label}=${value}  tx ${rc.hash.slice(0, 10)}…  ${Date.now() - t0} ms` +
       (paid ? `  -> ${paid} PAYOUT(S) EXECUTED` : ""));

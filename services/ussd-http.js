@@ -46,7 +46,7 @@ function createHandler({ ussd, outbox, smsChannel = null, token = "", log = cons
     catch { res.writeHead(400, CORS); return res.end("bad request"); }
 
     if (route === "/sms/delivery") { // always 200, so Africa's Talking does not keep retrying a report we cannot use
-      const known = outbox.recordDelivery(data);
+      const known = await outbox.recordDelivery(data);
       log.log(`[sms] delivery report ${data.id || "?"}: ${data.status || "?"}${data.failureReason ? ` (${data.failureReason})` : ""}${known ? "" : " - unknown message id"}`);
       res.writeHead(200, CORS); return res.end("ok");
     }

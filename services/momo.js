@@ -139,11 +139,11 @@ const SIM_OUTCOME = { "46733123450": "FAILED:PAYER_FAILED", "46733123451": "FAIL
 
 function createSimulatedMomo({ db = require("../web/server/db").get(), now = () => Date.now(), delayMs = Number(process.env.MOMO_SIM_DELAY_MS ?? 5000) } = {}) {
   const put = (kind) => async ({ ref, amount, phone }) => {
-    db.prepare("INSERT OR IGNORE INTO momo_sim (ref, kind, phone, amount, created_at) VALUES (?, ?, ?, ?, ?)").run(ref, kind, phone, String(amount), now());
+    await db.run("INSERT INTO momo_sim (ref, kind, phone, amount, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (ref) DO NOTHING", [ref, kind, phone, String(amount), now()]);
     return ref;
   };
   const status = (kind) => async (ref) => {
-    const r = db.prepare("SELECT * FROM momo_sim WHERE ref = ? AND kind = ?").get(ref, kind);
+    const r = await db.one("SELECT * FROM momo_sim WHERE ref = ? AND kind = ?", [ref, kind]);
     if (!r) return { status: "NOT_FOUND", reason: "MoMo has no request with this reference" };
     const forced = (process.env.MOMO_SIM_FAIL || "").split(",").map((x) => x.replace(/\D/g, "")).includes(r.phone) ? "FAILED:PAYER_DECLINED" : SIM_OUTCOME[r.phone];
     if (forced === "PENDING" || now() - r.created_at < delayMs) return { status: "PENDING", reason: null };

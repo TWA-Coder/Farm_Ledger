@@ -32,7 +32,7 @@ export async function GET(request, { params }) {
       else if (same(app.underwriter, who) && (await chain.isUnderwriter(who))) role = "underwriter";
       else if (auditors.includes(who.toLowerCase())) role = "auditor";
       else throw new core.DocError(403, "You are not allowed to see this application.");
-      http.logAccess({ viewer: who, role, applicant: farmer, application: `desk-${id}`, document: "application", action: "view" });
+      await http.logAccess({ viewer: who, role, applicant: farmer, application: `desk-${id}`, document: "application", action: "view" });
     }
     const rec = http.store.findForDesk({ applicant: farmer, deskApplicationId: id });
     return http.json({

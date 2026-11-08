@@ -39,30 +39,30 @@ function unseal(wrapKey, row) {
 
 function createStaffKeys({ db = dbm.get(), secret, now = () => Date.now() }) {
   const wrapKey = wrapKeyOf(secret);
-  const rowOf = (username) => db.prepare("SELECT * FROM staff_users WHERE username = ?").get(String(username || "").toLowerCase()) || null;
+  const rowOf = (username) => db.one("SELECT * FROM staff_users WHERE username = ?", [String(username || "").toLowerCase()]);
 
   // A new staff member: a fresh key, or `privateKey` to sign in as an address that already holds a role (the deployer,
   // the seeded demo accounts, the role keys in .env). No password yet: the portal sets one (web/server/auth.js).
-  function create({ username, name, role, phone = null, createdBy = null, privateKey = null }) {
+  async function create({ username, name, role, phone = null, createdBy = null, privateKey = null }) {
     const u = String(username || "").toLowerCase();
     if (!USERNAME_RE.test(u)) throw new Error("A username has 3 to 32 characters: lower-case letters, digits, '.', '_' or '-', starting with a letter.");
     if (!ROLES.includes(role)) throw new Error(`Role must be one of: ${ROLES.join(", ")}.`);
     if (phone !== null && !/^2507\d{8}$/.test(phone)) throw new Error("Phone numbers look like 2507XXXXXXXX.");
-    if (rowOf(u)) throw new Error("That username is already taken.");
+    if (await rowOf(u)) throw new Error("That username is already taken.");
     const wallet = privateKey ? new ethers.Wallet(privateKey) : ethers.Wallet.createRandom();
-    if (db.prepare("SELECT 1 FROM staff_users WHERE lower(address) = lower(?)").get(wallet.address)) throw new Error("That account already has a login.");
+    if (await db.one("SELECT 1 FROM staff_users WHERE lower(address) = lower(?)", [wallet.address])) throw new Error("That account already has a login.");
     const clean = profiles.cleanName(name);
-    dbm.tx(db, () => {
-      db.prepare(`INSERT INTO staff_users (username, address, name, role, phone, enc_key, must_change, created_by, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`).run(u, wallet.address, clean, role, phone, seal(wrapKey, wallet.privateKey, wallet.address), createdBy, new Date(now()).toISOString());
-      profiles.put(wallet.address, clean, db);
+    await db.tx(async (t) => {
+      await t.run(`INSERT INTO staff_users (username, address, name, role, phone, enc_key, must_change, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`, [u, wallet.address, clean, role, phone, seal(wrapKey, wallet.privateKey, wallet.address), createdBy, new Date(now()).toISOString()]);
+      await profiles.put(wallet.address, clean, t);
     });
     return { username: u, address: wallet.address };
   }
 
   // A signer for an enabled staff member. Only custody (and operator tools on the server) may call this.
-  function walletFor(username, provider) {
-    const r = rowOf(username);
+  async function walletFor(username, provider) {
+    const r = await rowOf(username);
     if (!r || r.disabled) throw new Error("No active staff account with that username.");
     return new ethers.Wallet(unseal(wrapKey, r), provider);
   }

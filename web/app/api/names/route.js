@@ -6,5 +6,5 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request) {
-  try { return http.json({ names: auth.namesFor(auth.requireViewer(request)) }); } catch (e) { return http.fail(e); }
+  try { return http.json({ names: await auth.namesFor(await auth.requireViewer(request)) }); } catch (e) { return http.fail(e); }
 }

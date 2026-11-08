@@ -10,18 +10,18 @@ function cleanName(name) {
   return n;
 }
 
-function put(address, name, db = dbm.get()) {
-  db.prepare("INSERT INTO profiles (address, name, updated_at) VALUES (?, ?, ?) ON CONFLICT(address) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at")
-    .run(String(address).toLowerCase(), cleanName(name), new Date().toISOString());
+async function put(address, name, db = dbm.get()) {
+  await db.run("INSERT INTO profiles (address, name, updated_at) VALUES (?, ?, ?) ON CONFLICT (address) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at",
+    [String(address).toLowerCase(), cleanName(name), new Date().toISOString()]);
 }
 
-function get(address, db = dbm.get()) {
-  return db.prepare("SELECT name FROM profiles WHERE address = ?").get(String(address).toLowerCase())?.name || null;
+async function get(address, db = dbm.get()) {
+  return (await db.one("SELECT name FROM profiles WHERE address = ?", [String(address).toLowerCase()]))?.name || null;
 }
 
 // { address(lower-case): name } for everyone, or only for `addresses`.
-function all(db = dbm.get(), addresses = null) {
-  const rows = db.prepare("SELECT address, name FROM profiles").all();
+async function all(db = dbm.get(), addresses = null) {
+  const rows = await db.all("SELECT address, name FROM profiles");
   const want = addresses ? new Set(addresses.map((a) => String(a).toLowerCase())) : null;
   return Object.fromEntries(rows.filter((r) => !want || want.has(r.address)).map((r) => [r.address, r.name]));
 }

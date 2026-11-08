@@ -158,8 +158,8 @@ async function main() {
     const D = (...names) => names.map((n) => b32(n.toUpperCase()));
     await (await desk.connect(underwriter).appointAgent(eric.address, D("Bugesera", "Kayonza", "Rwamagana"))).wait();
     await (await desk.connect(underwriter).appointAgent(claudine.address, D("Nyagatare", "Huye", "Musanze"))).wait();
-    contacts.put(eric.address, "250788000015", db);     // agents get SMS too (demo numbers: never texted live)
-    contacts.put(claudine.address, "250788000016", db);
+    await contacts.put(eric.address, "250788000015", db);     // agents get SMS too (demo numbers: never texted live)
+    await contacts.put(claudine.address, "250788000016", db);
   }
 
   // For the demo the livestock waiting period is shortened to 0 (production default: 7 days). Needs the admin role,
@@ -181,8 +181,8 @@ async function main() {
   for (const f of FARMERS) {
     const { account } = await accounts.register(f.phone, h(f.nid), info.policyDesk ? f.district : null); // + join -> agent
     const pin = LOCAL ? f.pin : String(crypto.randomInt(0, 10000)).padStart(4, "0");
-    pins.setPin(f.phone, pin);
-    profiles.put(account, f.name, db);
+    await pins.setPin(f.phone, pin);
+    await profiles.put(account, f.name, db);
     await (await token.mint(account, 2_000_000)).wait();
     const [lat, lon, area, crop] = f.plot, [tag, breed, year] = f.cow;
     // one sponsored operation from the farmer's own account: allow premium payments, record the plot and the cow
@@ -205,18 +205,19 @@ async function main() {
   ];
   for (const s of STAFF) {
     // a re-seed (e.g. after restarting the local chain) replaces the seeded login of the same name
-    const old = staffKeys.rowOf(s.username) || db.prepare("SELECT * FROM staff_users WHERE lower(address) = lower(?)").get(s.wallet.address);
+    const old = (await staffKeys.rowOf(s.username)) || (await db.one("SELECT * FROM staff_users WHERE lower(address) = lower(?)", [s.wallet.address]));
     if (old && old.created_by !== "seed") { console.log(`  login "${old.username}" exists and was not made by the seed: left as it is`); continue; }
-    if (old) { db.prepare("DELETE FROM staff_users WHERE username = ?").run(old.username); db.prepare("DELETE FROM sessions WHERE kind = 'staff' AND subject = ?").run(old.username); }
-    staffKeys.create({ username: s.username, name: s.name, role: s.role, phone: s.phone || null, createdBy: "seed", privateKey: s.wallet.privateKey });
+    if (old) { await db.run("DELETE FROM staff_users WHERE username = ?", [old.username]); await db.run("DELETE FROM sessions WHERE kind = 'staff' AND subject = ?", [old.username]); }
+    await staffKeys.create({ username: s.username, name: s.name, role: s.role, phone: s.phone || null, createdBy: "seed", privateKey: s.wallet.privateKey });
     const password = LOCAL ? LOCAL_PASSWORD : auth.tempPassword();
     const hp = auth.hashPassword(password);
-    db.prepare("UPDATE staff_users SET pw_salt = ?, pw_hash = ?, must_change = ? WHERE username = ?").run(hp.salt, hp.hash, LOCAL ? 0 : 1, s.username);
+    await db.run("UPDATE staff_users SET pw_salt = ?, pw_hash = ?, must_change = ? WHERE username = ?", [hp.salt, hp.hash, LOCAL ? 0 : 1, s.username]);
     logins.push({ kind: "staff", role: s.role, name: s.name, username: s.username, password });
   }
 
   if (LOCAL) {
-    const file = path.join(path.dirname(dbm.defaultFile()), "demo-logins.json");
+    fs.mkdirSync(dbm.dataDir(), { recursive: true });
+    const file = path.join(dbm.dataDir(), "demo-logins.json");
     fs.writeFileSync(file, JSON.stringify([...logins.filter((l) => l.kind === "staff"), ...logins.filter((l) => l.kind === "farmer")], null, 2));
   } else {
     const file = path.join(OUT, `${network.name}-logins.txt`);

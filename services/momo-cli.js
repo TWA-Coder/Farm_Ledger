@@ -29,7 +29,7 @@ async function main() {
   }
   const db = dbm.get();
   if (cmd === "list") {
-    const rows = db.prepare("SELECT * FROM momo_payments ORDER BY created_at DESC LIMIT 20").all();
+    const rows = await db.all("SELECT * FROM momo_payments ORDER BY created_at DESC LIMIT 20");
     console.log(`Mobile Money payments (${rows.length} most recent)`);
     for (const r of rows) {
       console.log(`  ${new Date(r.created_at).toLocaleString("en-GB")}  ${r.kind.padEnd(7)} ${r.status.padEnd(10)} ${String(r.amount).padStart(9)} ${r.currency}  +${r.phone}`
@@ -41,13 +41,13 @@ async function main() {
     const by = oplog.operatorFrom(process.argv);
     const { createPayments } = require("./payments");
     const dep = loadDeployment();
-    const full = db.prepare("SELECT ref FROM momo_payments WHERE ref LIKE ?").get(`${arg}%`);
+    const full = await db.one("SELECT ref FROM momo_payments WHERE ref LIKE ?", [`${arg}%`]);
     if (!full) throw new Error(`No payment with reference ${arg}`);
     // retry only re-queues the row; the notifier sends it on its next tick
     const p = createPayments({ db, provider: new ethers.JsonRpcProvider(dep.rpcUrl), ledgerAddress: dep.ledger, tokenAddress: dep.token, abi: loadAbi(),
       accounts: null, momo: { config: { currency: "-" } }, outbox: null, treasury: ethers.Wallet.createRandom() });
-    const ok = p.retry(full.ref);
-    if (ok) oplog.record({ operator: by, command: "momo retry", target: full.ref });
+    const ok = await p.retry(full.ref);
+    if (ok) await oplog.record({ operator: by, command: "momo retry", target: full.ref });
     console.log(ok ? "Queued again; the notifier sends it within a few seconds." : "Only a failed payout or refund can be retried.");
     return;
   }

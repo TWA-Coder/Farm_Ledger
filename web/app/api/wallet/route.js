@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 export async function POST(request) {
   try {
     auth.guard(request);
-    const viewer = auth.requireViewer(request);
+    const viewer = await auth.requireViewer(request);
     const b = await request.json();
     try {
       if (b.op === "send") return http.json({ hash: await auth.send(viewer, b.tx) });

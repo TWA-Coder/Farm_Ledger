@@ -26,7 +26,7 @@ async function main() {
     : null;
   const payments = accounts ? paymentsFromEnv({ provider, dep, abi, accounts, outbox }) : null;
   const onPayout = async ({ holder, amount, policyId, txHash, phone }) => {
-    const ref = payments && payments.startPayout({ holder, amount, policyId, txHash });
+    const ref = payments && (await payments.startPayout({ holder, amount, policyId, txHash }));
     console.log(ref ? `  MoMo payout ${ref.slice(0, 8)}: ${amount} RWF -> +${phone} (policy #${policyId})`
       : `  payout for policy #${policyId} stays in the farmer's own wallet (not a phone account)`);
   };

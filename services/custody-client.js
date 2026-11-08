@@ -13,7 +13,7 @@ function custodyConfig({ local }) {
   let token = process.env.CUSTODY_TOKEN || "";
   if (!token) {
     if (!local) throw new Error("Set CUSTODY_TOKEN in .env (e.g. `openssl rand -hex 24`): the portal and the phone services use it to reach key custody.");
-    const file = path.join(path.dirname(dbm.defaultFile()), "custody.token");
+    const file = path.join(dbm.dataDir(), "custody.token");
     if (!fs.existsSync(file)) {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, crypto.randomBytes(24).toString("hex"), { mode: 0o600 });

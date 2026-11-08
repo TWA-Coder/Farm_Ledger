@@ -168,43 +168,44 @@ function createOutbox({ db = dbm.get(), send = null, now = () => Date.now(), loc
   }
 
   // via: provider for this message (null = the default provider when it is sent)
-  function enqueue({ phone, text, kind = "notice", key = null, stored = text, via = null }) {
+  // conn: a transaction to record the message in (the notifier moves its cursor in the same one)
+  async function enqueue({ phone, text, kind = "notice", key = null, stored = text, via = null }, conn = db) {
     const t = now();
-    const r = db.prepare(`INSERT OR IGNORE INTO sms_outbox (dedupe_key, phone, text, kind, status, next_at, created_at, updated_at, via)
-      VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?)`).run(key, phone, stored, kind, t, t, t, via);
-    return r.changes ? Number(r.lastInsertRowid) : null; // null: already recorded
+    const r = await conn.run(`INSERT INTO sms_outbox (dedupe_key, phone, text, kind, status, next_at, created_at, updated_at, via)
+      VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING id`, [key, phone, stored, kind, t, t, t, via]);
+    return r.rows[0]?.id ?? null; // null: already recorded
   }
 
   const update = (id, fields) => {
     const keys = Object.keys(fields);
-    db.prepare(`UPDATE sms_outbox SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = ? WHERE id = ?`).run(...keys.map((k) => fields[k]), now(), id);
+    return db.run(`UPDATE sms_outbox SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = ? WHERE id = ?`, [...keys.map((k) => fields[k]), now(), id]);
   };
 
   // text: the real text to send (differs from the stored row only for one-time codes)
   async function deliver(row, text = row.text, { retry = true } = {}) {
     const via = row.via || defaultVia();
     const transport = transportFor(via);
-    if (!transport && via !== "log") { update(row.id, { status: "failed", error: `unknown SMS provider "${via}"` }); return { ok: false }; }
+    if (!transport && via !== "log") { await update(row.id, { status: "failed", error: `unknown SMS provider "${via}"` }); return { ok: false }; }
     const blocked = blockedReason(row.phone, transport);
-    if (blocked) { update(row.id, { status: "skipped", error: blocked }); log(`${new Date(now()).toISOString()}  SMS skipped (${blocked}) -> +${row.phone}: ${row.text}`); return { ok: false, skipped: true }; }
+    if (blocked) { await update(row.id, { status: "skipped", error: blocked }); log(`${new Date(now()).toISOString()}  SMS skipped (${blocked}) -> +${row.phone}: ${row.text}`); return { ok: false, skipped: true }; }
     if (!transport) { // log mode
       log(`${new Date(now()).toISOString()}  SMS -> +${row.phone}: ${text}`);
-      update(row.id, { status: "sent", attempts: row.attempts + 1, provider_status: "logged" });
+      await update(row.id, { status: "sent", attempts: row.attempts + 1, provider_status: "logged" });
       return { ok: true, logged: true };
     }
     const r = await transport(row.phone, text);
     const attempts = row.attempts + 1;
     log(`${new Date(now()).toISOString()}  SMS -> +${row.phone}: ${row.text}  [${r.ok ? `sent ${r.providerId || ""} ${r.cost || ""}` : `failed: ${r.error}`}]`);
-    if (r.ok) update(row.id, { status: "sent", attempts, via, provider_id: r.providerId || null, provider_status: r.status || null, cost: r.cost || null, error: null });
-    else if (retry && r.transient && attempts <= BACKOFF_MS.length) update(row.id, { status: "queued", attempts, next_at: now() + BACKOFF_MS[attempts - 1], error: r.error });
-    else update(row.id, { status: "failed", attempts, error: r.error });
+    if (r.ok) await update(row.id, { status: "sent", attempts, via, provider_id: r.providerId || null, provider_status: r.status || null, cost: r.cost || null, error: null });
+    else if (retry && r.transient && attempts <= BACKOFF_MS.length) await update(row.id, { status: "queued", attempts, next_at: now() + BACKOFF_MS[attempts - 1], error: r.error });
+    else await update(row.id, { status: "failed", attempts, error: r.error });
     return r;
   }
 
   // Sends every due message, oldest first, keeping per-phone order.
   async function drain({ limit = 50 } = {}) {
     const t = now();
-    const rows = db.prepare("SELECT * FROM sms_outbox WHERE status = 'queued' ORDER BY id LIMIT ?").all(limit * 4);
+    const rows = await db.all("SELECT * FROM sms_outbox WHERE status = 'queued' ORDER BY id LIMIT ?", [limit * 4]);
     const held = new Set(); // phones with an earlier message still waiting
     let sent = 0;
     for (const row of rows) {
@@ -221,18 +222,18 @@ function createOutbox({ db = dbm.get(), send = null, now = () => Date.now(), loc
   // One-time codes: sent at once, never retried from the queue, stored with the code masked.
   async function sendNow(phone, text, { kind = "notice", secret = null, via = null } = {}) {
     const stored = secret ? text.split(secret).join("******") : text;
-    const id = enqueue({ phone, text, kind, stored, via });
-    const row = db.prepare("SELECT * FROM sms_outbox WHERE id = ?").get(id);
+    const id = await enqueue({ phone, text, kind, stored, via });
+    const row = await db.one("SELECT * FROM sms_outbox WHERE id = ?", [id]);
     return deliver(row, text, { retry: !secret });
   }
 
   // Delivery report. Africa's Talking: Success|Failed|Rejected|Buffered|Sent|Submitted. Gateway: Delivered|Failed|Sent.
-  function recordDelivery({ id, status, failureReason }) {
-    const row = id && db.prepare("SELECT * FROM sms_outbox WHERE provider_id = ?").get(id);
+  async function recordDelivery({ id, status, failureReason }) {
+    const row = id && (await db.one("SELECT * FROM sms_outbox WHERE provider_id = ?", [id]));
     if (!row) return false;
     const final = status === "Success" || status === "Delivered" ? "delivered"
       : status === "Failed" || status === "Rejected" ? "undeliverable" : row.status;
-    update(row.id, { status: final, provider_status: status, error: failureReason || row.error });
+    await update(row.id, { status: final, provider_status: status, error: failureReason || row.error });
     return true;
   }
 
@@ -240,19 +241,19 @@ function createOutbox({ db = dbm.get(), send = null, now = () => Date.now(), loc
   // once a minute per message, until it is final. Called by the notifier on every tick.
   async function refreshStatuses({ limit = 20, status = intouchStatus } = {}) {
     const t = now();
-    const rows = db.prepare(`SELECT * FROM sms_outbox WHERE status = 'sent' AND via = 'intouch' AND provider_id IS NOT NULL
-      AND updated_at <= ? AND created_at >= ? ORDER BY updated_at LIMIT ?`).all(t - 60_000, t - 2 * DAY_MS, limit);
+    const rows = await db.all(`SELECT * FROM sms_outbox WHERE status = 'sent' AND via = 'intouch' AND provider_id IS NOT NULL
+      AND updated_at <= ? AND created_at >= ? ORDER BY updated_at LIMIT ?`, [t - 60_000, t - 2 * DAY_MS, limit]);
     let changed = 0;
     for (const row of rows) {
       let r;
       try { r = await status(row.provider_id); } catch { break; } // provider unreachable: try again next tick
-      if (r.final) { update(row.id, { status: r.final, provider_status: r.status }); changed++; }
-      else update(row.id, { provider_status: r.status || row.provider_status }); // touch updated_at: next check in a minute
+      if (r.final) { await update(row.id, { status: r.final, provider_status: r.status }); changed++; }
+      else await update(row.id, { provider_status: r.status || row.provider_status }); // touch updated_at: next check in a minute
     }
     return changed;
   }
 
-  const stats = () => Object.fromEntries(db.prepare("SELECT status, COUNT(*) n FROM sms_outbox GROUP BY status").all().map((r) => [r.status, r.n]));
+  const stats = async () => Object.fromEntries((await db.all("SELECT status, COUNT(*) n FROM sms_outbox GROUP BY status")).map((r) => [r.status, r.n]));
 
   const via = defaultVia();
   const mode = send ? "test"

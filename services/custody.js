@@ -110,14 +110,14 @@ function main() {
 
   async function staffRoute(route, j, send) {
     if (route === "/staff/create") {
-      const r = staffKeys.create({ username: j.username, name: j.name, role: j.role, phone: j.phone || null, createdBy: j.createdBy || null, privateKey: null });
+      const r = await staffKeys.create({ username: j.username, name: j.name, role: j.role, phone: j.phone || null, createdBy: j.createdBy || null, privateKey: null });
       await ensureGas(r.address);
       return send(200, r);
     }
     if (route === "/staff/send") {
       const why = checkStaff(j.tx);
       if (why) { console.warn(`[custody] refused staff tx for ${j.username}: ${why}`); return send(403, { error: `Refused by custody: ${why}.` }); }
-      const wallet = staffKeys.walletFor(j.username, provider);
+      const wallet = await staffKeys.walletFor(j.username, provider);
       const prev = staffSending.get(wallet.address) || Promise.resolve();
       const job = prev.catch(() => {}).then(async () => {
         await ensureGas(wallet.address);
@@ -133,7 +133,7 @@ function main() {
       }
     }
     if (route === "/staff/sign") {
-      const wallet = staffKeys.walletFor(j.username, provider);
+      const wallet = await staffKeys.walletFor(j.username, provider);
       if (j.typed) {
         const why = allowedTyped(j.typed, dep.ledger);
         if (why) return send(403, { error: `Refused by custody: ${why}.` });

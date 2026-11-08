@@ -25,6 +25,7 @@ const PHONE_RE = /^2507\d{8}$/;
 
 const fail = (status, msg) => { throw new DocError(status, msg); };
 const isLocal = () => ["localhost", "hardhat"].includes(require("./chain").deployment().network);
+const pinStore = (db) => require("../../services/pins").createPinStore({ db });
 
 // ---------------------------------------------------------------- passwords
 function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
@@ -48,11 +49,11 @@ function tempPassword() {
 // ---------------------------------------------------------------- sessions
 const sha = (s) => crypto.createHash("sha256").update(s).digest("hex");
 
-function createSession(kind, subject, db = dbm.get()) {
+async function createSession(kind, subject, db = dbm.get()) {
   const token = crypto.randomBytes(32).toString("base64url");
   const t = Date.now();
-  db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(t);
-  db.prepare("INSERT INTO sessions (id_hash, kind, subject, created_at, expires_at) VALUES (?, ?, ?, ?, ?)").run(sha(token), kind, subject, t, t + SESSION_MS);
+  await db.run("DELETE FROM sessions WHERE expires_at < ?", [t]);
+  await db.run("INSERT INTO sessions (id_hash, kind, subject, created_at, expires_at) VALUES (?, ?, ?, ?, ?)", [sha(token), kind, subject, t, t + SESSION_MS]);
   return token;
 }
 
@@ -65,19 +66,19 @@ function tokenOf(request) {
   return null;
 }
 
-function sessionOf(request, db = dbm.get()) {
+async function sessionOf(request, db = dbm.get()) {
   const token = tokenOf(request);
   if (!token) return null;
-  const r = db.prepare("SELECT * FROM sessions WHERE id_hash = ?").get(sha(token));
+  const r = await db.one("SELECT * FROM sessions WHERE id_hash = ?", [sha(token)]);
   if (!r || r.expires_at < Date.now()) return null;
   return { kind: r.kind, subject: r.subject, idHash: r.id_hash };
 }
 
-function endSession(request, db = dbm.get()) {
+async function endSession(request, db = dbm.get()) {
   const token = tokenOf(request);
-  if (token) db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(sha(token));
+  if (token) await db.run("DELETE FROM sessions WHERE id_hash = ?", [sha(token)]);
 }
-const endAllSessions = (kind, subject, db = dbm.get()) => db.prepare("DELETE FROM sessions WHERE kind = ? AND subject = ?").run(kind, subject);
+const endAllSessions = (kind, subject, db = dbm.get()) => db.run("DELETE FROM sessions WHERE kind = ? AND subject = ?", [kind, subject]);
 
 const secure = (request) => (request.headers.get("x-forwarded-proto") || new URL(request.url).protocol.replace(":", "")) === "https";
 function sessionCookie(request, token) {
@@ -91,35 +92,35 @@ function guard(request) {
 }
 
 // ---------------------------------------------------------------- who is signed in
-const staffRow = (username, db = dbm.get()) => db.prepare("SELECT * FROM staff_users WHERE username = ?").get(String(username || "").toLowerCase()) || null;
-const phoneRow = (phone, db = dbm.get()) => db.prepare("SELECT * FROM phone_accounts WHERE phone = ? AND status = 'active'").get(phone) || null;
+const staffRow = (username, db = dbm.get()) => db.one("SELECT * FROM staff_users WHERE username = ?", [String(username || "").toLowerCase()]);
+const phoneRow = (phone, db = dbm.get()) => db.one("SELECT * FROM phone_accounts WHERE phone = ? AND status = 'active'", [phone]);
 
 // -> { kind, address, name, role?, username?, phone?, mustChange? } or null
-function viewerOf(session, db = dbm.get()) {
+async function viewerOf(session, db = dbm.get()) {
   if (!session) return null;
   if (session.kind === "staff") {
-    const r = staffRow(session.subject, db);
+    const r = await staffRow(session.subject, db);
     if (!r || r.disabled) return null;
     return { kind: "staff", username: r.username, name: r.name, role: r.role, address: r.address, phone: r.phone, mustChange: Boolean(r.must_change) };
   }
   if (session.kind === "farmer") {
-    const r = phoneRow(session.subject, db);
+    const r = await phoneRow(session.subject, db);
     if (!r) return null;
-    return { kind: "farmer", role: "farmer", phone: r.phone, address: r.account, name: profiles.get(r.account, db) };
+    return { kind: "farmer", role: "farmer", phone: r.phone, address: r.account, name: await profiles.get(r.account, db) };
   }
   return null;
 }
 
-function requireViewer(request, { allowMustChange = false } = {}) {
-  const v = viewerOf(sessionOf(request));
+async function requireViewer(request, { allowMustChange = false } = {}) {
+  const v = await viewerOf(await sessionOf(request));
   if (!v) fail(401, "Please sign in.");
   if (v.mustChange && !allowMustChange) fail(403, "Choose a new password first.");
   return v;
 }
 
 // ---------------------------------------------------------------- sign in
-function loginStaff(username, password, db = dbm.get()) {
-  const r = staffRow(username, db);
+async function loginStaff(username, password, db = dbm.get()) {
+  const r = await staffRow(username, db);
   const t = Date.now();
   // the same answer for "no such user" and "wrong password", so usernames cannot be discovered here
   const wrong = () => fail(401, "Wrong username or password.");
@@ -127,11 +128,11 @@ function loginStaff(username, password, db = dbm.get()) {
   if (r.locked_until > t) fail(429, `Too many wrong passwords. Try again after ${new Date(r.locked_until).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}.`);
   if (!passwordMatches(password, r.pw_salt, r.pw_hash)) {
     const tries = r.tries + 1;
-    db.prepare("UPDATE staff_users SET tries = ?, locked_until = ? WHERE username = ?").run(tries >= STAFF_TRIES ? 0 : tries, tries >= STAFF_TRIES ? t + STAFF_LOCK_MS : 0, r.username);
+    await db.run("UPDATE staff_users SET tries = ?, locked_until = ? WHERE username = ?", [tries >= STAFF_TRIES ? 0 : tries, tries >= STAFF_TRIES ? t + STAFF_LOCK_MS : 0, r.username]);
     if (tries >= STAFF_TRIES) fail(429, "Too many wrong passwords. This login is locked for 15 minutes.");
     wrong();
   }
-  db.prepare("UPDATE staff_users SET tries = 0, locked_until = 0 WHERE username = ?").run(r.username);
+  await db.run("UPDATE staff_users SET tries = 0, locked_until = 0 WHERE username = ?", [r.username]);
   return createSession("staff", r.username, db);
 }
 
@@ -140,27 +141,27 @@ function normalizePhone(v) {
   return /^07\d{8}$/.test(d) ? "25" + d : /^7\d{8}$/.test(d) ? "250" + d : d;
 }
 
-function loginFarmer(phoneInput, pin, db = dbm.get()) {
+async function loginFarmer(phoneInput, pin, db = dbm.get()) {
   const phone = normalizePhone(phoneInput);
-  const pins = require("../../services/pins").createPinStore({ db });
+  const pins = pinStore(db);
   const wrong = () => fail(401, "Wrong phone number or PIN.");
   if (!PHONE_RE.test(phone)) fail(400, "Enter your phone number, e.g. 0788123456.");
-  if (pins.isLocked(phone)) fail(429, "Too many wrong tries. This number is locked for 30 minutes.");
-  const r = phoneRow(phone, db);
-  if (!r || !pins.hasPin(phone)) wrong();
-  const c = pins.checkPin(phone, String(pin || ""));
+  if (await pins.isLocked(phone)) fail(429, "Too many wrong tries. This number is locked for 30 minutes.");
+  const r = await phoneRow(phone, db);
+  if (!r || !(await pins.hasPin(phone))) wrong();
+  const c = await pins.checkPin(phone, String(pin || ""));
   if (!c.ok) { if (c.locked) fail(429, "Too many wrong PINs. This number is locked for 30 minutes (on USSD too)."); wrong(); }
   return createSession("farmer", phone, db);
 }
 
-function changePassword(viewer, current, next, db = dbm.get()) {
+async function changePassword(viewer, current, next, db = dbm.get()) {
   if (viewer.kind !== "staff") fail(400, "Farmers change their PIN from the USSD menu (option 4).");
-  const r = staffRow(viewer.username, db);
+  const r = await staffRow(viewer.username, db);
   if (!passwordMatches(current, r.pw_salt, r.pw_hash)) fail(401, "Your current password is not right.");
   checkNewPassword(next);
   if (next === current) fail(400, "Choose a password different from the current one.");
   const h = hashPassword(next);
-  db.prepare("UPDATE staff_users SET pw_salt = ?, pw_hash = ?, must_change = 0 WHERE username = ?").run(h.salt, h.hash, r.username);
+  await db.run("UPDATE staff_users SET pw_salt = ?, pw_hash = ?, must_change = 0 WHERE username = ?", [h.salt, h.hash, r.username]);
 }
 
 // ---------------------------------------------------------------- staff management
@@ -190,33 +191,33 @@ async function createStaff(viewer, { name, username, role, phone }) {
   const temp = tempPassword();
   const h = hashPassword(temp);
   const db = dbm.get();
-  db.prepare("UPDATE staff_users SET pw_salt = ?, pw_hash = ?, must_change = 1 WHERE username = ?").run(h.salt, h.hash, r.username);
-  if (ph) require("./contacts").put(r.address, ph, db); // agents and vets get SMS too
+  await db.run("UPDATE staff_users SET pw_salt = ?, pw_hash = ?, must_change = 1 WHERE username = ?", [h.salt, h.hash, r.username]);
+  if (ph) await require("./contacts").put(r.address, ph, db); // agents and vets get SMS too
   return { username: r.username, address: r.address, tempPassword: temp };
 }
 
-function listStaff(viewer, db = dbm.get()) {
+async function listStaff(viewer, db = dbm.get()) {
   if (viewer.kind !== "staff" || !["admin", "underwriter"].includes(viewer.role)) fail(403, "Not allowed.");
-  const rows = db.prepare("SELECT username, address, name, role, phone, disabled, must_change, created_by, created_at FROM staff_users ORDER BY created_at").all();
+  const rows = await db.all("SELECT username, address, name, role, phone, disabled, must_change, created_by, created_at FROM staff_users ORDER BY created_at");
   return rows.filter((r) => viewer.role === "admin" || r.role === "agent")
     .map((r) => ({ username: r.username, address: r.address, name: r.name, role: r.role, phone: r.phone, disabled: Boolean(r.disabled), pending: Boolean(r.must_change), createdBy: r.created_by, createdAt: r.created_at }));
 }
 
 async function manageStaff(viewer, username, action, db = dbm.get()) {
-  const r = staffRow(username, db);
+  const r = await staffRow(username, db);
   if (!r) fail(404, "No such login.");
   if (!(await canManage(viewer, r.role))) fail(403, "Not allowed.");
   if (r.username === viewer.username) fail(400, "You cannot change your own login here.");
   if (action === "reset") {
     const temp = tempPassword();
     const h = hashPassword(temp);
-    db.prepare("UPDATE staff_users SET pw_salt = ?, pw_hash = ?, must_change = 1, tries = 0, locked_until = 0 WHERE username = ?").run(h.salt, h.hash, r.username);
-    endAllSessions("staff", r.username, db);
+    await db.run("UPDATE staff_users SET pw_salt = ?, pw_hash = ?, must_change = 1, tries = 0, locked_until = 0 WHERE username = ?", [h.salt, h.hash, r.username]);
+    await endAllSessions("staff", r.username, db);
     return { tempPassword: temp };
   }
   if (action === "disable" || action === "enable") {
-    db.prepare("UPDATE staff_users SET disabled = ? WHERE username = ?").run(action === "disable" ? 1 : 0, r.username);
-    if (action === "disable") endAllSessions("staff", r.username, db);
+    await db.run("UPDATE staff_users SET disabled = ? WHERE username = ?", [action === "disable" ? 1 : 0, r.username]);
+    if (action === "disable") await endAllSessions("staff", r.username, db);
     return { disabled: action === "disable" };
   }
   fail(400, "Unknown action.");
@@ -238,9 +239,9 @@ async function sign(viewer, { message, typed }) {
 }
 
 // Names the viewer may see: staff see everyone's; a farmer sees their own and the staff's (their agent, vets).
-function namesFor(viewer, db = dbm.get()) {
+async function namesFor(viewer, db = dbm.get()) {
   if (viewer.kind === "staff") return profiles.all(db);
-  const staff = db.prepare("SELECT address FROM staff_users").all().map((r) => r.address);
+  const staff = (await db.all("SELECT address FROM staff_users")).map((r) => r.address);
   return profiles.all(db, [viewer.address, ...staff]);
 }
 

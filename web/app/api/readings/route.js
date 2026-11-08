@@ -8,6 +8,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const sources = {};
-  for (const r of dbm.get().prepare("SELECT tx, source FROM readings").all()) sources[r.tx] = r.source === "nasa-power" ? "nasa-power" : "sample";
+  try {
+    for (const r of await dbm.get().all("SELECT tx, source FROM readings")) sources[r.tx] = r.source === "nasa-power" ? "nasa-power" : "sample";
+  } catch (e) { console.error("[api/readings]", e.message); } // sources unknown: readings show as test readings
   return Response.json({ sources }, { headers: { "Cache-Control": "no-store" } });
 }

@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 export async function POST(request, { params }) {
   try {
     auth.guard(request);
-    const viewer = auth.requireViewer(request);
+    const viewer = await auth.requireViewer(request);
     const { action } = await request.json();
     return http.json(await auth.manageStaff(viewer, params.username, action));
   } catch (e) { return http.fail(e); }

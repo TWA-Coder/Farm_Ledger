@@ -5,8 +5,8 @@
   "private": true,
   "scripts": {
     "compile": "hardhat compile",
-    "test": "hardhat test",
-    "test:gas": "cross-env REPORT_GAS=true hardhat test",
+    "test": "node scripts/with-test-db.js hardhat test",
+    "test:gas": "cross-env REPORT_GAS=true node scripts/with-test-db.js hardhat test",
     "node": "hardhat node",
     "deploy:local": "hardhat run scripts/deploy.js --network localhost",
     "deploy:amoy": "hardhat run scripts/deploy.js --network polygonAmoy",
@@ -35,7 +35,8 @@
     "hardhat": "^2.22.15"
   },
   "dependencies": {
-    "ethers": "^6.13.4"
+    "ethers": "^6.13.4",
+    "pg": "8.16.3"
   },
   "engines": {
     "node": ">=22.5"

@@ -12,7 +12,7 @@ export async function GET() {
     const ledger = chain.ledger();
     const others = [chain.cropClaims(), chain.policyDesk()].filter(Boolean);
     const { block } = await indexer.sync({ provider: ledger.runner.provider, ledger, others, startBlock: chain.deployment().deployBlock });
-    return Response.json({ block, events: indexer.events(undefined, { raw: true }) }, { headers: { "Cache-Control": "no-store" } });
+    return Response.json({ block, events: await indexer.events(undefined, { raw: true }) }, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     console.error("[api/events]", e.shortMessage || e.message);
     return Response.json({ error: "The event index could not be updated. Is the chain (RPC_URL) reachable?" }, { status: 503 });

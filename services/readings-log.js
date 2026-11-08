@@ -16,25 +16,25 @@ function sourceFor(adapterName, metric) {
   return adapterName === "nasa" && Number(metric) === 0 ? "nasa-power" : "sample";
 }
 
-function read(db = dbm.get()) {
-  return db.prepare("SELECT * FROM readings ORDER BY logged_at, tx").all().map((r) => ({
+async function read(db = dbm.get()) {
+  return (await db.all("SELECT * FROM readings ORDER BY logged_at, tx")).map((r) => ({
     tx: r.tx, plotId: r.plot_id, metric: r.metric, value: r.value, observedAt: r.observed_at, source: r.source, adapter: r.adapter, loggedAt: r.logged_at,
   }));
 }
 
 // { [tx lowercased]: "nasa-power" | "sample" }
-function sources(db = dbm.get()) {
+async function sources(db = dbm.get()) {
   const out = {};
-  for (const r of db.prepare("SELECT tx, source FROM readings").all()) out[r.tx] = r.source;
+  for (const r of await db.all("SELECT tx, source FROM readings")) out[r.tx] = r.source;
   return out;
 }
 
-function append(entry, db = dbm.get()) {
+async function append(entry, db = dbm.get()) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(entry.tx || "")) throw new Error("readings-log: entry needs a transaction hash");
   if (!SOURCES.includes(entry.source)) throw new Error(`readings-log: unknown source ${entry.source}`);
-  // INSERT OR IGNORE: the same transaction is recorded once, whatever the letter case of its hash (idempotent)
-  db.prepare("INSERT OR IGNORE INTO readings (tx, plot_id, metric, value, observed_at, source, adapter, logged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-    .run(entry.tx.toLowerCase(), entry.plotId ?? null, entry.metric ?? null, entry.value ?? null, entry.observedAt ?? null, entry.source, entry.adapter ?? null, new Date().toISOString());
+  // ON CONFLICT DO NOTHING: the same transaction is recorded once, whatever the letter case of its hash (idempotent)
+  await db.run("INSERT INTO readings (tx, plot_id, metric, value, observed_at, source, adapter, logged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tx) DO NOTHING",
+    [entry.tx.toLowerCase(), entry.plotId ?? null, entry.metric ?? null, entry.value ?? null, entry.observedAt ?? null, entry.source, entry.adapter ?? null, new Date().toISOString()]);
 }
 
 module.exports = { SOURCES, sourceFor, read, sources, append };

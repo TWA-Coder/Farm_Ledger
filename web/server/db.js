@@ -1,149 +1,200 @@
-// FarmLedger off-chain database (SQLite, built into Node 22.5+ as node:sqlite: no extra dependency or native build).
-// One file shared by the web portal and the services (oracle, notifier, USSD):
+// FarmLedger off-chain database: PostgreSQL (e.g. Neon), shared by the web portal and the services (oracle,
+// notifier, USSD, custody). Connection: DATABASE_URL (in .env, or .env.<network> for a public network).
 //
-//   contacts    plain phone numbers for SMS, keyed by account (the chain only stores keccak256(phone))
-//   ussd_users  USSD PIN state (salted hash, failed tries, lock)
-//   readings    where each oracle reading came from (real data or sample), keyed by transaction hash
-//   events      index of FarmLedger contract events (see indexer.js), so screens never scan the chain from block 0
-//   meta        indexer cursor and the identity of the chain the indexed data belongs to
+//   meta            indexer cursor and the identity of the chain the indexed data belongs to
+//   contacts        plain phone numbers for SMS, keyed by account (the chain only stores keccak256(phone))
+//   ussd_users      farmers' PIN state (salted hash, failed tries, lock), shared by USSD and the portal
+//   ussd_lang       each phone number's USSD language (en / rw), see services/ussd-text.js
+//   readings        where each oracle reading came from (real data or sample), keyed by transaction hash
+//   events          index of FarmLedger contract events (see indexer.js), so screens never scan the chain from block 0
 //   phone_accounts  farmers on basic phones: smart account + its owner key, ENCRYPTED (services/phone-accounts.js)
 //   otp_codes       one-time SMS codes (hashed), per phone and purpose
 //   recovery_requests  moving a phone account to a new number (waiting period, cancellable from the old number)
-//   sms_outbox  every SMS: queued -> sent -> delivered/undeliverable, with retries and provider ids (services/sms.js)
-//   momo_payments  MTN MoMo premium collections, payouts and refunds, step by step (services/payments.js)
+//   sms_outbox      every SMS: queued -> sent -> delivered/undeliverable, with retries and provider ids (services/sms.js)
+//   momo_payments   MTN MoMo premium collections, payouts and refunds, step by step (services/payments.js)
+//   momo_sim        the Mobile Money simulator's own records (services/momo.js)
 //   sms_inbound / sms_sessions  SMS received by the Android gateway phone, and each phone's menu conversation
-//   staff_users  portal logins for admins, underwriters, vets and agents: name, role, password hash and their
-//                blockchain key ENCRYPTED (only the custody service can decrypt it, services/staff-keys.js)
-//   sessions     signed-in portal sessions (staff by username, farmers by phone), keyed by a hash of the cookie
-//   profiles     people's names by account address (names are personal data: never written on-chain)
+//   staff_users     portal logins for admins, underwriters, vets and agents: name, role, password hash and their
+//                   blockchain key ENCRYPTED (only the custody service can decrypt it, services/staff-keys.js)
+//   sessions        signed-in portal sessions (staff by username, farmers by phone), keyed by a hash of the cookie
+//   profiles        people's names by account address (names are personal data: never written on-chain)
+//   operator_log    operator commands run from the CLIs (services/operator-log.js)
+//   doc_access_log  every read of someone else's document (web/server/http.js)
 //
-// Location: $FARMLEDGER_DB, else web/.data/farmledger.db (git-ignored). WAL mode lets the portal and the services
-// read and write the same file at the same time.
+// Interface (all async). Queries use "?" placeholders; they are turned into PostgreSQL's $1, $2... here.
+//   db.one(sql, params)  -> first row or null      db.all(sql, params) -> rows
+//   db.run(sql, params)  -> { changes, rows }      db.exec(sql)        -> several statements, no parameters
+//   db.tx(async (t) => ...)  one transaction; t has the same methods (use t, not db, inside)
+// BIGINT columns (millisecond times, amounts) come back as JavaScript numbers.
+//
+// Tests: with TEST_DATABASE_URL set (npm test starts a throwaway PostgreSQL in Docker, scripts/with-test-db.js),
+// get() and openIsolated() use a fresh schema of that database, never DATABASE_URL.
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+
+let pgModule = null;
+function pg() {
+  if (!pgModule) {
+    pgModule = require("pg");
+    pgModule.types.setTypeParser(20, (v) => (v === null ? null : Number(v))); // int8 -> number (all values < 2^53)
+  }
+  return pgModule;
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contacts (address TEXT PRIMARY KEY, phone TEXT NOT NULL, saved_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ussd_users (
   phone TEXT PRIMARY KEY, salt TEXT, pin_hash TEXT, tries INTEGER NOT NULL DEFAULT 0,
-  locked_until INTEGER NOT NULL DEFAULT 0, pin_set_at TEXT);
+  locked_until BIGINT NOT NULL DEFAULT 0, pin_set_at TEXT);
+CREATE TABLE IF NOT EXISTS ussd_lang (phone TEXT PRIMARY KEY, lang TEXT NOT NULL, updated_at BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS readings (
-  tx TEXT PRIMARY KEY, plot_id INTEGER, metric INTEGER, value INTEGER, observed_at INTEGER,
+  tx TEXT PRIMARY KEY, plot_id BIGINT, metric INTEGER, value BIGINT, observed_at BIGINT,
   source TEXT NOT NULL, adapter TEXT, logged_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events (
-  block INTEGER NOT NULL, log_index INTEGER NOT NULL, tx TEXT NOT NULL, name TEXT NOT NULL, args TEXT NOT NULL,
+  block BIGINT NOT NULL, log_index INTEGER NOT NULL, tx TEXT NOT NULL, name TEXT NOT NULL, args TEXT NOT NULL,
   PRIMARY KEY (block, log_index));
 CREATE INDEX IF NOT EXISTS events_name ON events (name);
 CREATE TABLE IF NOT EXISTS phone_accounts (
   phone TEXT PRIMARY KEY, account TEXT NOT NULL UNIQUE, owner TEXT NOT NULL, enc_key TEXT NOT NULL,
   status TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS otp_codes (
-  phone TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, data TEXT, expires_at INTEGER NOT NULL,
-  tries INTEGER NOT NULL DEFAULT 0, sent_at INTEGER NOT NULL, sends INTEGER NOT NULL DEFAULT 1, window_start INTEGER NOT NULL,
+  phone TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, data TEXT, expires_at BIGINT NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0, sent_at BIGINT NOT NULL, sends INTEGER NOT NULL DEFAULT 1, window_start BIGINT NOT NULL,
   verified INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (phone, purpose));
 CREATE TABLE IF NOT EXISTS sms_outbox (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, dedupe_key TEXT UNIQUE, phone TEXT NOT NULL, text TEXT NOT NULL, kind TEXT NOT NULL,
-  status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, provider_id TEXT, provider_status TEXT,
-  cost TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, dedupe_key TEXT UNIQUE, phone TEXT NOT NULL, text TEXT NOT NULL,
+  kind TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at BIGINT NOT NULL, provider_id TEXT,
+  provider_status TEXT, cost TEXT, error TEXT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, via TEXT);
 CREATE INDEX IF NOT EXISTS sms_outbox_due ON sms_outbox (status, next_at);
 CREATE INDEX IF NOT EXISTS sms_outbox_provider ON sms_outbox (provider_id);
 CREATE TABLE IF NOT EXISTS sms_inbound (
-  id TEXT PRIMARY KEY, phone TEXT NOT NULL, text TEXT NOT NULL, received_at INTEGER NOT NULL, reply TEXT);
+  id TEXT PRIMARY KEY, phone TEXT NOT NULL, text TEXT NOT NULL, received_at BIGINT NOT NULL, reply TEXT);
 CREATE TABLE IF NOT EXISTS sms_sessions (
-  phone TEXT PRIMARY KEY, session_id TEXT NOT NULL, inputs TEXT NOT NULL, updated_at INTEGER NOT NULL);
+  phone TEXT PRIMARY KEY, session_id TEXT NOT NULL, inputs TEXT NOT NULL, updated_at BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS momo_payments (
-  ref TEXT PRIMARY KEY, kind TEXT NOT NULL, phone TEXT NOT NULL, account TEXT NOT NULL, amount INTEGER NOT NULL,
-  currency TEXT NOT NULL, external_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, intent TEXT, policy_id INTEGER,
-  reason TEXT, financial_tx TEXT, parent TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  ref TEXT PRIMARY KEY, kind TEXT NOT NULL, phone TEXT NOT NULL, account TEXT NOT NULL, amount BIGINT NOT NULL,
+  currency TEXT NOT NULL, external_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, intent TEXT, policy_id BIGINT,
+  reason TEXT, financial_tx TEXT, parent TEXT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);
 CREATE INDEX IF NOT EXISTS momo_payments_status ON momo_payments (status, updated_at);
 CREATE TABLE IF NOT EXISTS momo_sim (
-  ref TEXT PRIMARY KEY, kind TEXT NOT NULL, phone TEXT NOT NULL, amount TEXT NOT NULL, created_at INTEGER NOT NULL);
+  ref TEXT PRIMARY KEY, kind TEXT NOT NULL, phone TEXT NOT NULL, amount TEXT NOT NULL, created_at BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS recovery_requests (
+  id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, old_phone TEXT NOT NULL, new_phone TEXT NOT NULL, account TEXT NOT NULL,
+  status TEXT NOT NULL, created_at BIGINT NOT NULL, ready_at BIGINT, done_at BIGINT, note TEXT);
 CREATE TABLE IF NOT EXISTS staff_users (
   username TEXT PRIMARY KEY, address TEXT NOT NULL UNIQUE, name TEXT NOT NULL, role TEXT NOT NULL, phone TEXT,
   enc_key TEXT NOT NULL, pw_salt TEXT, pw_hash TEXT, must_change INTEGER NOT NULL DEFAULT 1, tries INTEGER NOT NULL DEFAULT 0,
-  locked_until INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created_by TEXT, created_at TEXT NOT NULL);
+  locked_until BIGINT NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created_by TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (
-  id_hash TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+  id_hash TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL);
 CREATE INDEX IF NOT EXISTS sessions_subject ON sessions (kind, subject);
 CREATE TABLE IF NOT EXISTS profiles (address TEXT PRIMARY KEY, name TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS recovery_requests (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, old_phone TEXT NOT NULL, new_phone TEXT NOT NULL, account TEXT NOT NULL,
-  status TEXT NOT NULL, created_at INTEGER NOT NULL, ready_at INTEGER, done_at INTEGER, note TEXT);
+CREATE TABLE IF NOT EXISTS operator_log (at TEXT NOT NULL, operator TEXT NOT NULL, command TEXT NOT NULL, target TEXT NOT NULL, detail TEXT);
+CREATE TABLE IF NOT EXISTS doc_access_log (
+  at TEXT NOT NULL, viewer TEXT NOT NULL, role TEXT NOT NULL, applicant TEXT NOT NULL, application TEXT NOT NULL,
+  document TEXT NOT NULL, action TEXT NOT NULL);
 `;
+const SCHEMA_LOCK = 724_310_001; // advisory lock id: one process creates the schema at a time
 
-// The web server runs with cwd = web/, the services with cwd = the repository root.
+// "?" placeholders -> $1, $2... (outside quoted strings and identifiers)
+function toPg(sql) {
+  let out = "", n = 0, quote = null;
+  for (const ch of sql) {
+    if (quote) { if (ch === quote) quote = null; out += ch; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; out += ch; continue; }
+    out += ch === "?" ? `$${++n}` : ch;
+  }
+  return out;
+}
+
+// The query methods, over a pool or over one client inside a transaction.
+function methods(runner, inTx) {
+  const q = (sql, params = []) => runner.query(toPg(sql), params);
+  const m = {
+    one: async (sql, params) => (await q(sql, params)).rows[0] ?? null,
+    all: async (sql, params) => (await q(sql, params)).rows,
+    run: async (sql, params) => { const r = await q(sql, params); return { changes: r.rowCount ?? 0, rows: r.rows }; },
+    exec: async (sql) => { await runner.query(sql); },
+  };
+  m.tx = inTx ? (fn) => fn(m) : null;
+  return m;
+}
+
+class Db {
+  constructor({ url, schema = null, max = Number(process.env.DATABASE_POOL_MAX || 5) }) {
+    const { Pool } = pg();
+    this.schema = schema;
+    this.pool = new Pool({ connectionString: url, max, allowExitOnIdle: true, ...(schema ? { options: `-c search_path=${schema}` } : {}) });
+    this.pool.on("error", (e) => console.error("[db] idle client error:", e.message)); // a dropped connection must not crash the process
+    this.ready = this.init();
+    this.ready.catch(() => {}); // reported on first use
+    const { tx: _none, ...base } = methods({ query: async (...a) => { await this.ready; return this.pool.query(...a); } }, false);
+    Object.assign(this, base); // tx() is the class method below
+  }
+
+  async init() {
+    const c = await this.pool.connect();
+    try {
+      if (this.schema) await c.query(`CREATE SCHEMA IF NOT EXISTS ${this.schema}`);
+      await c.query("BEGIN");
+      await c.query(`SELECT pg_advisory_xact_lock(${SCHEMA_LOCK})`);
+      await c.query(SCHEMA);
+      await c.query("COMMIT");
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw new Error(`Cannot open the FarmLedger database: ${e.message}`);
+    } finally { c.release(); }
+  }
+
+  async tx(fn) {
+    await this.ready;
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      const r = await fn(methods(c, true));
+      await c.query("COMMIT");
+      return r;
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally { c.release(); }
+  }
+
+  async close() { await this.pool.end(); }
+}
+
 function repoRoot() {
   const cwd = process.cwd();
   return fs.existsSync(path.join(cwd, "hardhat.config.js")) ? cwd : path.dirname(cwd);
 }
-const defaultFile = () => process.env.FARMLEDGER_DB || path.join(repoRoot(), "web", ".data", "farmledger.db");
+// Local files that are not database rows (key-encryption secret, custody token, uploads, demo sign-in list).
+const dataDir = () => process.env.FARMLEDGER_DATA_DIR || path.join(repoRoot(), "web", ".data");
 
-function quietRequireSqlite() {
-  // node:sqlite prints an "experimental feature" warning once per process; it is stable enough for this use.
-  const emit = process.emitWarning;
-  process.emitWarning = (w, ...rest) => (String(w).includes("SQLite") ? undefined : emit.call(process, w, ...rest));
-  try { return require("node:sqlite"); } finally { process.emitWarning = emit; }
+// A database in its own new schema of TEST_DATABASE_URL (tests): nothing is shared between two of them.
+function openIsolated(url = process.env.TEST_DATABASE_URL) {
+  if (!url) throw new Error("TEST_DATABASE_URL is not set: run the tests with npm test (it starts a test PostgreSQL in Docker).");
+  return new Db({ url, schema: `t_${crypto.randomBytes(6).toString("hex")}`, max: 3 });
 }
 
-function open(file = defaultFile()) {
-  const { DatabaseSync } = quietRequireSqlite();
-  if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-  db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
-  db.exec(SCHEMA);
-  upgrade(db);
-  if (file !== ":memory:") { try { fs.chmodSync(file, 0o600); } catch { /* not fatal */ } } // phone numbers: owner only
-  if (file === defaultFile()) migrateJsonFiles(db); // tests open their own files and never import real data
-  return db;
-}
-
-// Columns added after a table first shipped (CREATE TABLE IF NOT EXISTS does not add them to an existing file).
-function upgrade(db) {
-  const has = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
-  if (!has("sms_outbox", "via")) db.exec("ALTER TABLE sms_outbox ADD COLUMN via TEXT"); // provider that sends it
+function open(url = process.env.DATABASE_URL) {
+  if (!url) throw new Error("Set DATABASE_URL in .env to your PostgreSQL database (e.g. Neon's pooled connection string).");
+  // node-postgres already treats sslmode=require as verify-full (certificate and host checked); saying so explicitly
+  // keeps that behaviour when the driver changes its default, and silences its warning
+  return new Db({ url: url.replace(/([?&]sslmode=)(require|prefer|verify-ca)\b/, "$1verify-full") });
 }
 
 let shared = null;
-function get() { // one connection per process
-  if (!shared) shared = open();
+function get() { // one pool per process
+  if (!shared) shared = process.env.TEST_DATABASE_URL ? openIsolated() : open();
   return shared;
 }
 
-function tx(db, fn) {
-  db.exec("BEGIN IMMEDIATE");
-  try { const r = fn(); db.exec("COMMIT"); return r; } catch (e) { db.exec("ROLLBACK"); throw e; }
-}
+// Run fn in one transaction (fn receives the transaction's db).
+const tx = (db, fn) => db.tx(fn);
 
-const getMeta = (db, key) => db.prepare("SELECT value FROM meta WHERE key = ?").get(key)?.value ?? null;
-const setMeta = (db, key, value) => db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, String(value));
+const getMeta = async (db, key) => (await db.one("SELECT value FROM meta WHERE key = ?", [key]))?.value ?? null;
+const setMeta = (db, key, value) => db.run("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [key, String(value)]);
 
-// One-time import of the JSON files used before the database existed. Each file is renamed to *.imported afterwards.
-function migrateJsonFiles(db) {
-  if (process.env.FARMLEDGER_DB_NO_IMPORT || getMeta(db, "json_imported")) return;
-  const root = repoRoot();
-  const files = {
-    contacts: process.env.CONTACTS_FILE || path.join(root, "web", ".data", "contacts.json"),
-    ussd: path.join(root, "services", "out", "ussd-users.json"),
-    readings: process.env.ORACLE_READINGS_LOG || path.join(root, "services", "out", "readings.json"),
-  };
-  const load = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
-  tx(db, () => {
-    const c = load(files.contacts);
-    if (c && typeof c === "object") for (const [address, v] of Object.entries(c)) {
-      if (v && v.phone) db.prepare("INSERT OR IGNORE INTO contacts VALUES (?, ?, ?)").run(address.toLowerCase(), v.phone, v.savedAt || new Date().toISOString());
-    }
-    const u = load(files.ussd);
-    if (u && typeof u === "object") for (const [phone, v] of Object.entries(u)) {
-      db.prepare("INSERT OR IGNORE INTO ussd_users VALUES (?, ?, ?, ?, ?, ?)").run(phone, v.salt || null, v.pinHash || null, v.tries || 0, v.lockedUntil || 0, v.pinSetAt || null);
-    }
-    const r = load(files.readings);
-    if (Array.isArray(r)) for (const e of r) {
-      if (e && e.tx) db.prepare("INSERT OR IGNORE INTO readings VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(e.tx.toLowerCase(), e.plotId ?? null, e.metric ?? null, e.value ?? null, e.observedAt ?? null, e.source, e.adapter ?? null, e.loggedAt || new Date().toISOString());
-    }
-    setMeta(db, "json_imported", new Date().toISOString());
-  });
-  for (const f of Object.values(files)) if (fs.existsSync(f)) { try { fs.renameSync(f, f + ".imported"); } catch { /* leave it */ } }
-}
-
-module.exports = { open, get, tx, getMeta, setMeta, defaultFile };
+module.exports = { open, openIsolated, get, tx, getMeta, setMeta, dataDir, toPg };

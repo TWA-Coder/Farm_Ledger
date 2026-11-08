@@ -15,14 +15,12 @@ function flag(argv, name) {
   return i >= 0 ? argv[i + 1] : null;
 }
 
-function record({ operator, command, target, detail = "" }, db = dbm.get()) {
-  db.exec("CREATE TABLE IF NOT EXISTS operator_log (at TEXT NOT NULL, operator TEXT NOT NULL, command TEXT NOT NULL, target TEXT NOT NULL, detail TEXT)");
-  db.prepare("INSERT INTO operator_log VALUES (?, ?, ?, ?, ?)").run(new Date().toISOString(), operator, command, String(target), detail);
+async function record({ operator, command, target, detail = "" }, db = dbm.get()) {
+  await db.run("INSERT INTO operator_log (at, operator, command, target, detail) VALUES (?, ?, ?, ?, ?)", [new Date().toISOString(), operator, command, String(target), detail]);
 }
 
 function recent(limit = 20, db = dbm.get()) {
-  db.exec("CREATE TABLE IF NOT EXISTS operator_log (at TEXT NOT NULL, operator TEXT NOT NULL, command TEXT NOT NULL, target TEXT NOT NULL, detail TEXT)");
-  return db.prepare("SELECT * FROM operator_log ORDER BY at DESC LIMIT ?").all(limit);
+  return db.all("SELECT * FROM operator_log ORDER BY at DESC LIMIT ?", [limit]);
 }
 
 module.exports = { operatorFrom, flag, record, recent };

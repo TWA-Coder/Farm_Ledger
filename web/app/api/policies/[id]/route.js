@@ -40,8 +40,8 @@ export async function GET(request, { params }) {
     if (!record) record = http.store.findForPolicy({ applicant: pol.holder, policyId }); // policies from before PolicyDesk
     const contract = record ? http.store.getDecision({ applicant: pol.holder, application: record.application, kind: "contract" }) : null;
     const anchored = await ledger.applicationHashOf(policyId);
-    http.logAccess({ viewer: signer, role, applicant: pol.holder, application: record?.application || `policy-${policyId}`, document: "policy-record", action: "view" });
-    const phone = contacts.read()[pol.holder.toLowerCase()]?.phone || null;
+    await http.logAccess({ viewer: signer, role, applicant: pol.holder, application: record?.application || `policy-${policyId}`, document: "policy-record", action: "view" });
+    const phone = (await contacts.read())[pol.holder.toLowerCase()]?.phone || null;
     return http.json({
       record: record ? { application: record.application, answers: record.answers, documents: record.documents, finalizedAt: record.finalizedAt, schemaVersion: record.schemaVersion, deskApplicationId: record.deskApplicationId ?? null } : null,
       contract: contract ? contract.content : null,
