@@ -57,7 +57,7 @@ describe("Key custody service", function () {
   });
 
   it("the USSD side registers a farmer through the custody service without ever holding the key secret", async () => {
-    const db = dbm.open(":memory:");
+    const db = dbm.openIsolated();
     const transport = async (op) => {
       const rc = await (await ctx.entryPoint.connect(ctx.relayer).handleOps([uo.packUserOp(op)], ctx.relayer.address)).wait();
       const evs = rc.logs.map((l) => { try { return ctx.entryPoint.interface.parseLog(l); } catch { return null; } }).filter(Boolean);
@@ -81,7 +81,7 @@ describe("Key custody service", function () {
     try {
       const url = `http://127.0.0.1:${server.address().port}`;
       const outside = createPhoneAccounts({ ...common, custody: { url, token: TOKEN } });
-      expect(() => outside.signerFor("250783000800")).to.throw(/custody/);
+      await expect(outside.signerFor("250783000800")).to.be.rejectedWith(/custody/);
       const { account } = await outside.register("250783000800", hash("1199580000001111"), "BUGESERA");
       expect((await ctx.ledger.getFarmer(account)).exists).to.equal(true);
       expect(await ctx.desk.agentOf(account)).to.equal(ctx.agent.address);

@@ -29,7 +29,7 @@ describe("IntouchSMS provider", function () {
 
   beforeEach(() => {
     reqs = [];
-    db = dbm.open(":memory:");
+    db = dbm.openIsolated();
     clock = Date.now();
     for (const k of ENV) { saved[k] = process.env[k]; delete process.env[k]; }
     Object.assign(process.env, { INTOUCH_USERNAME: "farmledger", INTOUCH_PASSWORD: "pw", INTOUCH_SENDER: "FarmLedger",
@@ -40,7 +40,7 @@ describe("IntouchSMS provider", function () {
   afterEach(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
 
   const box = () => createOutbox({ db, localChain: true, logFile: null, quiet: true, now: () => clock });
-  const row = () => db.prepare("SELECT status, via, provider_id, provider_status, cost, error FROM sms_outbox ORDER BY id DESC").get();
+  const row = () => db.one("SELECT status, via, provider_id, provider_status, cost, error FROM sms_outbox ORDER BY id DESC");
 
   it("is chosen automatically when configured, and sends the documented form request with basic auth", async () => {
     const b = box();
@@ -52,8 +52,8 @@ describe("IntouchSMS provider", function () {
     expect(q.type).to.equal("application/x-www-form-urlencoded");
     expect(q.auth).to.equal("Basic " + Buffer.from("farmledger:pw").toString("base64"));
     expect(q.body).to.deep.equal({ username: "farmledger", password: "pw", recipients: "250788000001", message: "FarmLedger code: 123456.", sender: "FarmLedger" });
-    expect(row()).to.deep.include({ status: "sent", via: "intouch", provider_id: "238254", provider_status: "P", cost: "RWF 18" });
-    expect(db.prepare("SELECT text FROM sms_outbox").get().text).to.equal("FarmLedger code: ******."); // stored masked
+    expect(await row()).to.deep.include({ status: "sent", via: "intouch", provider_id: "238254", provider_status: "P", cost: "RWF 18" });
+    expect((await db.one("SELECT text FROM sms_outbox")).text).to.equal("FarmLedger code: ******."); // stored masked
   });
 
   it("can send JSON and other number formats instead (their docs disagree with their samples)", async () => {
@@ -74,33 +74,33 @@ describe("IntouchSMS provider", function () {
     clock += 61_000;
     statusReply = { http: 200, body: { success: true, results: { status: "S" } } };
     expect(await b.refreshStatuses()).to.equal(0);
-    expect(row()).to.deep.include({ status: "sent", provider_status: "S" });
+    expect(await row()).to.deep.include({ status: "sent", provider_status: "S" });
     clock += 61_000;
     statusReply = { http: 200, body: { success: true, results: { status: "D" } } };
     expect(await b.refreshStatuses()).to.equal(1);
-    expect(row()).to.deep.include({ status: "delivered", provider_status: "D" });
+    expect(await row()).to.deep.include({ status: "delivered", provider_status: "D" });
     expect(reqs.filter((r) => r.url === "/api/getsmsstatus/.json").at(-1).body).to.deep.include({ messageid: "238254" });
 
     await b.sendNow(ME, "two");
     clock += 61_000;
     statusReply = { http: 200, body: { success: true, results: { status: "U" } } };
     await b.refreshStatuses();
-    expect(row()).to.deep.include({ status: "undeliverable", provider_status: "U" });
+    expect(await row()).to.deep.include({ status: "undeliverable", provider_status: "U" });
   });
 
   it("records a refused request with Intouch's reason and does not retry it; retries a server error", async () => {
     sendReply = { http: 400, body: { success: false, response: "Insufficient balance" } };
     await box().sendNow(ME, "a");
-    expect(row()).to.deep.include({ status: "failed", error: "HTTP 400 Insufficient balance" });
+    expect(await row()).to.deep.include({ status: "failed", error: "HTTP 400 Insufficient balance" });
     sendReply = { http: 503, body: "Service Unavailable" };
     await box().sendNow(ME, "b");
-    expect(row()).to.deep.include({ status: "queued" });
+    expect(await row()).to.deep.include({ status: "queued" });
   });
 
   it("still applies the allowlist on the local chain", async () => {
     await box().sendNow("250788000002", "not listed");
     expect(reqs).to.have.length(0);
-    expect(row().status).to.equal("skipped");
+    expect((await row()).status).to.equal("skipped");
   });
 
   it("SMS_ALLOWLIST=* texts any number except the seeded demo numbers", async () => {
@@ -108,10 +108,10 @@ describe("IntouchSMS provider", function () {
     const b = box();
     await b.sendNow("250783123456", "anyone");
     expect(reqs).to.have.length(1);
-    expect(row().status).to.equal("sent");
+    expect((await row()).status).to.equal("sent");
     await b.sendNow("250788000001", "demo farmer Aline");
     expect(reqs).to.have.length(1);
-    expect(row()).to.deep.include({ status: "skipped", error: "seeded demo number (never texted live)" });
+    expect(await row()).to.deep.include({ status: "skipped", error: "seeded demo number (never texted live)" });
   });
 
   it("SMS_PROVIDER overrides the automatic choice", async () => {

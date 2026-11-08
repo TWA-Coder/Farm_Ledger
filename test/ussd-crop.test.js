@@ -29,7 +29,7 @@ describe("USSD crop loss claims", function () {
       token: (await artifacts.readArtifact("MockRWF")).abi,
       cropClaims: (await artifacts.readArtifact("CropClaims")).abi,
     };
-    u = createUssd({ provider: ethers.provider, abi, ledgerAddress: ctx.ledgerAddr, cropClaimsAddress: await claims.getAddress(), agent: ctx.outsider, db: dbm.open(":memory:") });
+    u = createUssd({ provider: ethers.provider, abi, ledgerAddress: ctx.ledgerAddr, cropClaimsAddress: await claims.getAddress(), agent: ctx.outsider, db: dbm.openIsolated() });
     await dial([PIN, PIN]);
   });
 

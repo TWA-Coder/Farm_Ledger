@@ -165,19 +165,19 @@ describe("Portal support code", function () {
     for (const cover of [0, 1, 2, 3]) expect(req.documentsFor({ cover }).map((d) => d.id)).to.not.include("claim_photo");
   });
 
-  it("oracle readings log records the real source and is idempotent", () => {
-    const db = dbm.open(":memory:");
+  it("oracle readings log records the real source and is idempotent", async () => {
+    const db = dbm.openIsolated();
     {
       expect(readingsLog.sourceFor("nasa", Metric.Rainfall)).to.equal("nasa-power");
       expect(readingsLog.sourceFor("nasa", Metric.NDVI)).to.equal("sample"); // no live NDVI feed
       expect(readingsLog.sourceFor("mock", Metric.Rainfall)).to.equal("sample");
       const tx = "0x" + "cd".repeat(32);
-      readingsLog.append({ tx, plotId: 1, metric: 0, value: 700, source: "sample" }, db);
-      readingsLog.append({ tx: tx.toUpperCase().replace("0X", "0x"), plotId: 1, metric: 0, value: 700, source: "sample" }, db);
-      expect(readingsLog.read(db)).to.have.length(1);
-      expect(readingsLog.sources(db)).to.deep.equal({ [tx]: "sample" });
-      expect(() => readingsLog.append({ tx, source: "made-up" }, db)).to.throw();
-      expect(() => readingsLog.append({ tx: "0x12", source: "sample" }, db)).to.throw();
+      (await readingsLog.append({ tx, plotId: 1, metric: 0, value: 700, source: "sample" }, db));
+      (await readingsLog.append({ tx: tx.toUpperCase().replace("0X", "0x"), plotId: 1, metric: 0, value: 700, source: "sample" }, db));
+      expect((await readingsLog.read(db))).to.have.length(1);
+      expect((await readingsLog.sources(db))).to.deep.equal({ [tx]: "sample" });
+      await expect(readingsLog.append({ tx, source: "made-up" }, db)).to.be.rejected;
+      await expect(readingsLog.append({ tx: "0x12", source: "sample" }, db)).to.be.rejected;
     }
   });
 
@@ -193,7 +193,7 @@ describe("Portal support code", function () {
   });
 
   it("SMS contact numbers are accepted only when signed by the farmer and matching the on-chain phone hash", async () => {
-    const db = dbm.open(":memory:");
+    const db = dbm.openIsolated();
     const w = ethers.Wallet.createRandom(), other = ethers.Wallet.createRandom();
     const phone = "250788000003";
     const phoneHashOf = async (a) => (a.toLowerCase() === w.address.toLowerCase() ? hash(phone) : null);
@@ -207,9 +207,9 @@ describe("Portal support code", function () {
       await expect(contacts.save(await req(other, phone, other.address), { phoneHashOf, db })).to.be.rejectedWith("not registered");
       await expect(contacts.save(await req(w, "0788"), { phoneHashOf, db })).to.be.rejectedWith("Invalid phone");
       expect(await contacts.save(await req(w), { phoneHashOf, db })).to.deep.equal({ saved: true });
-      expect(contacts.read(db)[w.address.toLowerCase()].phone).to.equal(phone);
-      expect(contacts.phoneForHash(hash(phone), db)).to.equal(phone);
-      expect(contacts.phoneForHash(hash("250788999999"), db)).to.equal(null);
+      expect((await contacts.read(db))[w.address.toLowerCase()].phone).to.equal(phone);
+      expect((await contacts.phoneForHash(hash(phone), db))).to.equal(phone);
+      expect((await contacts.phoneForHash(hash("250788999999"), db))).to.equal(null);
     }
   });
 

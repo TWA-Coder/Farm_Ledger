@@ -11,144 +11,144 @@ const { allowedStaffTx, allowedMessage, allowedTyped } = require("../services/cu
 const signing = require("../web/shared/signing");
 
 const req = (cookie, headers = {}) => new Request("http://localhost/api/auth", { headers: { ...(cookie ? { cookie } : {}), ...headers } });
-const cookieOf = (setCookie) => setCookie.split(";")[0];
-const expectFail = (fn, status, re) => {
-  try { fn(); } catch (e) { expect(e.status).to.equal(status); if (re) expect(e.message).to.match(re); return; }
+async function expectFail(fn, status, re) {
+  try { await fn(); } catch (e) { expect(e.status).to.equal(status); if (re) expect(e.message).to.match(re); return; }
   throw new Error("expected a failure");
-};
+}
 
 describe("Portal sign-in", function () {
   let db, staff, secret;
-  const setPassword = (username, pw, mustChange = 0) => {
+  const setPassword = async (username, pw, mustChange = 0) => {
     const h = auth.hashPassword(pw);
-    db.prepare("UPDATE staff_users SET pw_salt = ?, pw_hash = ?, must_change = ? WHERE username = ?").run(h.salt, h.hash, mustChange, username);
+    await db.run("UPDATE staff_users SET pw_salt = ?, pw_hash = ?, must_change = ? WHERE username = ?", [h.salt, h.hash, mustChange, username]);
   };
+  const viewer = async (token) => auth.viewerOf(await auth.sessionOf(req(`fl_session=${token}`), db), db);
 
   beforeEach(() => {
-    db = dbm.open(":memory:");
+    db = dbm.openIsolated();
     secret = crypto.randomBytes(32);
     staff = createStaffKeys({ db, secret });
   });
 
   describe("staff (username + password)", function () {
-    it("stores no password and no key in the clear; the key opens only with the secret and only for its address", () => {
-      const { address } = staff.create({ username: "grace.uw", name: "Grace Ingabire", role: "underwriter" });
-      setPassword("grace.uw", "correct horse battery");
-      const row = db.prepare("SELECT * FROM staff_users WHERE username = 'grace.uw'").get();
+    it("stores no password and no key in the clear; the key opens only with the secret and only for its address", async () => {
+      const { address } = await staff.create({ username: "grace.uw", name: "Grace Ingabire", role: "underwriter" });
+      await setPassword("grace.uw", "correct horse battery");
+      const row = await db.one("SELECT * FROM staff_users WHERE username = 'grace.uw'");
       expect(row.pw_hash).to.match(/^[0-9a-f]{128}$/);
       expect(JSON.stringify(row)).to.not.include("correct horse");
       expect(Object.keys(JSON.parse(row.enc_key)).sort()).to.deep.equal(["ct", "iv", "tag", "v"]);
-      expect(staff.walletFor("grace.uw").address).to.equal(address);
-      expect(() => createStaffKeys({ db, secret: crypto.randomBytes(32) }).walletFor("grace.uw")).to.throw(); // other secret
-      db.prepare("UPDATE staff_users SET address = ? WHERE username = 'grace.uw'").run(ethers.Wallet.createRandom().address);
-      expect(() => staff.walletFor("grace.uw")).to.throw(); // ciphertext bound to the address
+      expect((await staff.walletFor("grace.uw")).address).to.equal(address);
+      await expect(createStaffKeys({ db, secret: crypto.randomBytes(32) }).walletFor("grace.uw")).to.be.rejected; // other secret
+      await db.run("UPDATE staff_users SET address = ? WHERE username = 'grace.uw'", [ethers.Wallet.createRandom().address]);
+      await expect(staff.walletFor("grace.uw")).to.be.rejected; // ciphertext bound to the address
     });
 
-    it("validates usernames, roles and names, and refuses duplicates", () => {
-      expect(() => staff.create({ username: "Bad Name", name: "X Y", role: "vet" })).to.throw(/username/);
-      expect(() => staff.create({ username: "dr.u", name: "Dr Uwase", role: "oracle" })).to.throw(/Role/);
-      expect(() => staff.create({ username: "dr.u", name: "1", role: "vet" })).to.throw(/name/);
-      staff.create({ username: "dr.u", name: "Dr Uwase", role: "vet" });
-      expect(() => staff.create({ username: "DR.U", name: "Dr Uwase", role: "vet" })).to.throw(/taken/);
-      expect(profiles.all(db)[staff.rowOf("dr.u").address.toLowerCase()]).to.equal("Dr Uwase");
+    it("validates usernames, roles and names, and refuses duplicates", async () => {
+      await expect(staff.create({ username: "Bad Name", name: "X Y", role: "vet" })).to.be.rejectedWith(/username/);
+      await expect(staff.create({ username: "dr.u", name: "Dr Uwase", role: "oracle" })).to.be.rejectedWith(/Role/);
+      await expect(staff.create({ username: "dr.u", name: "1", role: "vet" })).to.be.rejectedWith(/name/);
+      await staff.create({ username: "dr.u", name: "Dr Uwase", role: "vet" });
+      await expect(staff.create({ username: "DR.U", name: "Dr Uwase", role: "vet" })).to.be.rejectedWith(/taken/);
+      expect((await profiles.all(db))[(await staff.rowOf("dr.u")).address.toLowerCase()]).to.equal("Dr Uwase");
     });
 
-    it("signs in with the right password only, the same answer for unknown users, and locks after 5 tries", () => {
-      staff.create({ username: "eric", name: "Eric Nshimiyimana", role: "agent" });
-      setPassword("eric", "agent-password-1");
-      expectFail(() => auth.loginStaff("nobody", "x", db), 401, /Wrong username or password/);
-      for (let i = 0; i < 4; i++) expectFail(() => auth.loginStaff("eric", "wrong-password", db), 401, /Wrong username or password/);
-      expectFail(() => auth.loginStaff("eric", "wrong-password", db), 429, /locked/);
-      expectFail(() => auth.loginStaff("eric", "agent-password-1", db), 429); // even the right one, while locked
-      db.prepare("UPDATE staff_users SET locked_until = 0 WHERE username = 'eric'").run();
-      const token = auth.loginStaff("ERIC", "agent-password-1", db);
-      expect(auth.viewerOf(auth.sessionOf(req(`fl_session=${token}`), db), db)).to.include({ kind: "staff", username: "eric", role: "agent", name: "Eric Nshimiyimana" });
+    it("signs in with the right password only, the same answer for unknown users, and locks after 5 tries", async () => {
+      await staff.create({ username: "eric", name: "Eric Nshimiyimana", role: "agent" });
+      await setPassword("eric", "agent-password-1");
+      await expectFail(() => auth.loginStaff("nobody", "x", db), 401, /Wrong username or password/);
+      for (let i = 0; i < 4; i++) await expectFail(() => auth.loginStaff("eric", "wrong-password", db), 401, /Wrong username or password/);
+      await expectFail(() => auth.loginStaff("eric", "wrong-password", db), 429, /locked/);
+      await expectFail(() => auth.loginStaff("eric", "agent-password-1", db), 429); // even the right one, while locked
+      await db.run("UPDATE staff_users SET locked_until = 0 WHERE username = 'eric'");
+      const token = await auth.loginStaff("ERIC", "agent-password-1", db);
+      expect(await viewer(token)).to.include({ kind: "staff", username: "eric", role: "agent", name: "Eric Nshimiyimana" });
     });
 
-    it("a disabled login cannot sign in, and its open sessions stop working", () => {
-      staff.create({ username: "eric", name: "Eric N", role: "agent" });
-      setPassword("eric", "agent-password-1");
-      const token = auth.loginStaff("eric", "agent-password-1", db);
-      db.prepare("UPDATE staff_users SET disabled = 1 WHERE username = 'eric'").run();
-      expect(auth.viewerOf(auth.sessionOf(req(`fl_session=${token}`), db), db)).to.equal(null);
-      expectFail(() => auth.loginStaff("eric", "agent-password-1", db), 401);
+    it("a disabled login cannot sign in, and its open sessions stop working", async () => {
+      await staff.create({ username: "eric", name: "Eric N", role: "agent" });
+      await setPassword("eric", "agent-password-1");
+      const token = await auth.loginStaff("eric", "agent-password-1", db);
+      await db.run("UPDATE staff_users SET disabled = 1 WHERE username = 'eric'");
+      expect(await viewer(token)).to.equal(null);
+      await expectFail(() => auth.loginStaff("eric", "agent-password-1", db), 401);
     });
 
-    it("a one-time password must be changed, to a new password of at least 8 characters", () => {
-      staff.create({ username: "dr.u", name: "Dr Uwase", role: "vet" });
-      setPassword("dr.u", "kite-4821-moss", 1);
-      const viewer = auth.viewerOf(auth.sessionOf(req(`fl_session=${auth.loginStaff("dr.u", "kite-4821-moss", db)}`), db), db);
-      expect(viewer.mustChange).to.equal(true);
-      expectFail(() => auth.changePassword(viewer, "wrong", "a-good-password", db), 401);
-      expectFail(() => auth.changePassword(viewer, "kite-4821-moss", "short", db), 400);
-      auth.changePassword(viewer, "kite-4821-moss", "a-good-password", db);
-      expect(db.prepare("SELECT must_change FROM staff_users WHERE username = 'dr.u'").get().must_change).to.equal(0);
-      expect(() => auth.loginStaff("dr.u", "a-good-password", db)).to.not.throw();
+    it("a one-time password must be changed, to a new password of at least 8 characters", async () => {
+      await staff.create({ username: "dr.u", name: "Dr Uwase", role: "vet" });
+      await setPassword("dr.u", "kite-4821-moss", 1);
+      const v = await viewer(await auth.loginStaff("dr.u", "kite-4821-moss", db));
+      expect(v.mustChange).to.equal(true);
+      await expectFail(() => auth.changePassword(v, "wrong", "a-good-password", db), 401);
+      await expectFail(() => auth.changePassword(v, "kite-4821-moss", "short", db), 400);
+      await auth.changePassword(v, "kite-4821-moss", "a-good-password", db);
+      expect((await db.one("SELECT must_change FROM staff_users WHERE username = 'dr.u'")).must_change).to.equal(0);
+      await auth.loginStaff("dr.u", "a-good-password", db);
     });
   });
 
   describe("sessions", function () {
-    it("keeps only a hash of the token; the cookie is HttpOnly and SameSite=Strict (Secure over https)", () => {
-      const token = auth.createSession("farmer", "250788000001", db);
-      expect(db.prepare("SELECT * FROM sessions").all().map((r) => r.id_hash)).to.not.include(token);
-      expect(auth.sessionOf(req(`a=1; fl_session=${token}`), db)).to.include({ kind: "farmer", subject: "250788000001" });
-      expect(auth.sessionOf(req("fl_session=forged"), db)).to.equal(null);
+    it("keeps only a hash of the token; the cookie is HttpOnly and SameSite=Strict (Secure over https)", async () => {
+      const token = await auth.createSession("farmer", "250788000001", db);
+      expect((await db.all("SELECT * FROM sessions")).map((r) => r.id_hash)).to.not.include(token);
+      expect(await auth.sessionOf(req(`a=1; fl_session=${token}`), db)).to.include({ kind: "farmer", subject: "250788000001" });
+      expect(await auth.sessionOf(req("fl_session=forged"), db)).to.equal(null);
       const c = auth.sessionCookie(req(null), token);
       expect(c).to.include("HttpOnly").and.include("SameSite=Strict").and.not.include("Secure");
       expect(auth.sessionCookie(req(null, { "x-forwarded-proto": "https" }), token)).to.include("Secure");
     });
 
-    it("expires, and ends on sign-out", () => {
-      const token = auth.createSession("staff", "eric", db);
-      db.prepare("UPDATE sessions SET expires_at = ?").run(Date.now() - 1);
-      expect(auth.sessionOf(req(`fl_session=${token}`), db)).to.equal(null);
-      const t2 = auth.createSession("staff", "eric", db);
-      auth.endSession(req(`fl_session=${t2}`), db);
-      expect(auth.sessionOf(req(`fl_session=${t2}`), db)).to.equal(null);
+    it("expires, and ends on sign-out", async () => {
+      const token = await auth.createSession("staff", "eric", db);
+      await db.run("UPDATE sessions SET expires_at = ?", [Date.now() - 1]);
+      expect(await auth.sessionOf(req(`fl_session=${token}`), db)).to.equal(null);
+      const t2 = await auth.createSession("staff", "eric", db);
+      await auth.endSession(req(`fl_session=${t2}`), db);
+      expect(await auth.sessionOf(req(`fl_session=${t2}`), db)).to.equal(null);
     });
 
-    it("refuses changes without the X-FarmLedger header (cross-site requests cannot add it)", () => {
-      expectFail(() => auth.guard(req(null)), 403);
+    it("refuses changes without the X-FarmLedger header (cross-site requests cannot add it)", async () => {
+      await expectFail(() => auth.guard(req(null)), 403);
       expect(() => auth.guard(req(null, { "x-farmledger": "1" }))).to.not.throw();
     });
   });
 
   describe("farmers (phone number + PIN, shared with USSD)", function () {
     const PHONE = "250788000777";
-    beforeEach(() => {
-      db.prepare("INSERT INTO phone_accounts (phone, account, owner, enc_key, status, created_at) VALUES (?, ?, ?, '{}', 'active', ?)")
-        .run(PHONE, "0x00000000000000000000000000000000000000aa", "0x00000000000000000000000000000000000000bb", new Date().toISOString());
-      createPinStore({ db }).setPin(PHONE, "2468");
-      profiles.put("0x00000000000000000000000000000000000000aa", "Mukamana Aline", db);
+    beforeEach(async () => {
+      await db.run("INSERT INTO phone_accounts (phone, account, owner, enc_key, status, created_at) VALUES (?, ?, ?, '{}', 'active', ?)",
+        [PHONE, "0x00000000000000000000000000000000000000aa", "0x00000000000000000000000000000000000000bb", new Date().toISOString()]);
+      await createPinStore({ db }).setPin(PHONE, "2468");
+      await profiles.put("0x00000000000000000000000000000000000000aa", "Mukamana Aline", db);
     });
 
-    it("signs in with the local or international number and the PIN", () => {
-      const token = auth.loginFarmer("0788 000 777", "2468", db);
-      expect(auth.viewerOf(auth.sessionOf(req(`fl_session=${token}`), db), db)).to.include({ kind: "farmer", role: "farmer", phone: PHONE, name: "Mukamana Aline" });
-      expect(() => auth.loginFarmer("+250788000777", "2468", db)).to.not.throw();
+    it("signs in with the local or international number and the PIN", async () => {
+      const token = await auth.loginFarmer("0788 000 777", "2468", db);
+      expect(await viewer(token)).to.include({ kind: "farmer", role: "farmer", phone: PHONE, name: "Mukamana Aline" });
+      await auth.loginFarmer("+250788000777", "2468", db);
     });
 
-    it("3 wrong PINs lock the number for the portal AND the USSD menu", () => {
-      expectFail(() => auth.loginFarmer(PHONE, "1111", db), 401);
-      expectFail(() => auth.loginFarmer(PHONE, "1111", db), 401);
-      expectFail(() => auth.loginFarmer(PHONE, "1111", db), 429, /locked/);
-      expect(createPinStore({ db }).isLocked(PHONE)).to.equal(true); // the USSD menu sees the same lock
-      expectFail(() => auth.loginFarmer(PHONE, "2468", db), 429);
+    it("3 wrong PINs lock the number for the portal AND the USSD menu", async () => {
+      await expectFail(() => auth.loginFarmer(PHONE, "1111", db), 401);
+      await expectFail(() => auth.loginFarmer(PHONE, "1111", db), 401);
+      await expectFail(() => auth.loginFarmer(PHONE, "1111", db), 429, /locked/);
+      expect(await createPinStore({ db }).isLocked(PHONE)).to.equal(true); // the USSD menu sees the same lock
+      await expectFail(() => auth.loginFarmer(PHONE, "2468", db), 429);
     });
 
-    it("an unknown number gets the same answer as a wrong PIN", () => {
-      expectFail(() => auth.loginFarmer("0788999999", "2468", db), 401, /Wrong phone number or PIN/);
+    it("an unknown number gets the same answer as a wrong PIN", async () => {
+      await expectFail(() => auth.loginFarmer("0788999999", "2468", db), 401, /Wrong phone number or PIN/);
     });
   });
 
   describe("names (off-chain)", function () {
-    it("staff see everyone's names; a farmer sees their own and the staff's, not other farmers'", () => {
-      const { address: agent } = staff.create({ username: "eric", name: "Eric N", role: "agent" });
-      profiles.put("0x00000000000000000000000000000000000000aa", "Aline M", db);
-      profiles.put("0x00000000000000000000000000000000000000cc", "Jean H", db);
-      const asStaff = auth.namesFor({ kind: "staff" }, db);
+    it("staff see everyone's names; a farmer sees their own and the staff's, not other farmers'", async () => {
+      const { address: agent } = await staff.create({ username: "eric", name: "Eric N", role: "agent" });
+      await profiles.put("0x00000000000000000000000000000000000000aa", "Aline M", db);
+      await profiles.put("0x00000000000000000000000000000000000000cc", "Jean H", db);
+      const asStaff = await auth.namesFor({ kind: "staff" }, db);
       expect(Object.values(asStaff)).to.include.members(["Eric N", "Aline M", "Jean H"]);
-      const asAline = auth.namesFor({ kind: "farmer", address: "0x00000000000000000000000000000000000000AA" }, db);
+      const asAline = await auth.namesFor({ kind: "farmer", address: "0x00000000000000000000000000000000000000AA" }, db);
       expect(asAline).to.deep.equal({ "0x00000000000000000000000000000000000000aa": "Aline M", [agent.toLowerCase()]: "Eric N" });
     });
 
