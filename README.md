@@ -15,9 +15,18 @@ Link: https://www.awesomescreenshot.com/video/58175426?key=6f2bd69d5f89b78570f20
 |---|---|---|
 | **Node.js 22.5 or later** (22 LTS recommended) | [nodejs.org](https://nodejs.org) or `brew install node@22` | [nodejs.org](https://nodejs.org) installer |
 | **Git** | `xcode-select --install` or `brew install git` | [git-scm.com](https://git-scm.com/download/win) |
+| **A PostgreSQL database** | a free [Neon](https://neon.com) project (or any PostgreSQL 14+) | same |
 | A modern browser | Chrome, Edge, Firefox, Brave or Safari | Chrome, Edge, Firefox or Brave |
+| Docker Desktop (only to run the tests) | [docker.com](https://www.docker.com/products/docker-desktop/) | same |
 
-Check with `node -v` (must print v22.5 or higher). Nothing else is needed for the demo.
+Check with `node -v` (must print v22.5 or higher).
+
+**Database:** create a `.env` file in the project folder with your database's connection string (Neon: *Connect* ->
+pooled connection string). `.env` is git-ignored; never commit it or paste it anywhere.
+```
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require
+```
+The tables are created on first start. See [Web portal: off-chain data](docs/PORTAL.md#off-chain-data).
 
 ## Get the code
 
@@ -79,7 +88,9 @@ npm run web                            # 5. portal on http://localhost:3000
 ```
 npm test
 ```
-Contract, service and server tests (about 220). They also run on GitHub for every push.
+Contract, service and server tests (about 240). They need **Docker Desktop running**: `npm test` starts a throwaway
+PostgreSQL container, gives every test file its own schema in it and removes the container afterwards, so the tests
+never touch your `DATABASE_URL`. To use another PostgreSQL instead (e.g. in CI), set `TEST_DATABASE_URL`.
 
 ## Real SMS, USSD and Mobile Money (optional)
 
@@ -91,7 +102,9 @@ Step by step: [Phones, USSD and SMS](docs/PHONE_AND_SMS.md) and [Mobile Money](d
 
 | Problem | Fix |
 |---|---|
-| `node -v` is below 22.5, or `node:sqlite` errors | Install Node 22 LTS |
+| `node -v` is below 22.5 | Install Node 22 LTS |
+| "Set DATABASE_URL in .env" or "Cannot open the FarmLedger database" | Add your PostgreSQL connection string to `.env` (see *Requirements*); check the password and that the database is reachable |
+| `npm test`: "Docker is not running" | Start Docker Desktop and wait until it says it is running |
 | "Port ... is already in use" | A previous run is still going: stop it (Ctrl+C or close its windows). Find it with `lsof -nP -iTCP:3000 -sTCP:LISTEN` (macOS) or `netstat -ano \| findstr :3000` (Windows) |
 | Portal says the contracts are gone | The chain was restarted: run `npm run deploy:local && npm run seed`, then reload |
 | No code SMS arrives | Without SMS keys, codes are only in `services/out/sms.log`; with keys see [PHONE_AND_SMS.md](docs/PHONE_AND_SMS.md) |

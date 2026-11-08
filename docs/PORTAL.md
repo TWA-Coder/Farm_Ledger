@@ -27,7 +27,9 @@ The portal opens on a sign-in page (`web/views/login.js`); the server side is `w
 | `CUSTODY_URL`, `CUSTODY_TOKEN` | `http://127.0.0.1:4100`, generated (local chain) | How the portal and the phone services reach key custody. Required off the local chain |
 | `STAFF_GAS`, `FUNDER_PRIVATE_KEY` | `0.05`, `PRIVATE_KEY` (local: account #0) | Staff accounts are topped up to this much native coin from the funder when they run low |
 | `UPLOAD_DIR` | `web/.data/uploads` | Uploaded application and claim documents |
-| `FARMLEDGER_DB` | `web/.data/farmledger.db` | Off-chain SQLite database shared by the portal and the services (see *Off-chain data* below) |
+| `DATABASE_URL` | required | Off-chain PostgreSQL database shared by the portal and the services (see *Off-chain data* below) |
+| `DATABASE_POOL_MAX` | `5` | Database connections per process |
+| `FARMLEDGER_DATA_DIR` | `web/.data` | Local files that are not database rows: the local key-encryption secret, custody token, demo sign-in list |
 | `INDEXER_CONFIRMATIONS`, `INDEXER_CHUNK_BLOCKS` | `0`, `2000` | Event index: blocks to wait before indexing (use ~3 on a public network) and blocks per log request |
 | `FARMLEDGER_REVIEWERS` | empty | Comma-separated addresses allowed to view any applicant document (on-chain underwriters can already view them) |
 | `BUNDLER_URL` | `http://localhost:4337` | Written into the deployment at deploy time; where the portal sends farmers' UserOperations |
@@ -37,16 +39,24 @@ The portal opens on a sign-in page (`web/views/login.js`); the server side is `w
 
 ## Off-chain data
 
-One SQLite file (`web/.data/farmledger.db`, git-ignored, owner-only permissions) holds what the chain does not:
+A PostgreSQL database (`DATABASE_URL`, e.g. a free Neon project; `web/server/db.js`) holds what the chain does not:
 plain phone numbers for SMS (`contacts`; the chain stores only their hash), farmers' PINs (`ussd_users`, shared by
 USSD and the portal), staff logins with their encrypted keys (`staff_users`), signed-in sessions (`sessions`),
 people's names (`profiles`), where
-each oracle reading came from (`readings`), and an index of every contract event (`events`). It uses SQLite built
-into Node 22.5+, so there is nothing to install. The portal reads activity from `/api/events`, which brings the
+each oracle reading came from (`readings`), an index of every contract event (`events`), the SMS outbox, Mobile
+Money payments and the operator and document-access logs. The tables are created on first start (under an advisory
+lock, so several services starting together are safe). The portal reads activity from `/api/events`, which brings the
 index up to date on each request (`web/server/indexer.js`) instead of scanning the chain from block 0. When the local
 chain is restarted, the index notices and rebuilds itself.
-Older JSON files (`web/.data/contacts.json`, `services/out/ussd-users.json`, `services/out/readings.json`) are
-imported once on first start and renamed to `*.imported`.
+
+* **Why PostgreSQL:** the portal, USSD, custody, notifier and payment services write at the same time; PostgreSQL
+  gives them real row locking and transactions (e.g. an SMS and the notifier's cursor are recorded together, so an
+  event is never texted twice), unique constraints that stop a MoMo payment from being recorded twice, and managed
+  backups when hosted (Neon: point-in-time restore, branches).
+* **One database per network:** put the local demo's `DATABASE_URL` in `.env` and a public network's in its overlay
+  (e.g. `.env.polygonAmoy`, a separate Neon branch), so the two never mix.
+* **Connection security:** `sslmode=require` is treated as `verify-full` (the server certificate and host name are
+  checked). Uploaded documents are files on disk (`UPLOAD_DIR`), not database rows.
 
 ## Known limits of the test version
 

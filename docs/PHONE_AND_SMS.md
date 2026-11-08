@@ -20,6 +20,7 @@ Open <http://localhost:3000/ussd> for a handset simulator, or point an Africa's 
 * Demo numbers: `250788000001` Aline and `250788000002` Jean (registered by the seed script). First call asks for a 4-digit PIN; 3 wrong PINs lock the number for 30 minutes.
 * **Why the gateway cannot book a policy (enforced, not just hidden):** the service holds one key with `CLAIMS_AGENT_ROLE`, which on-chain can call only `fileClaimFor` (on FarmLedger for cattle, on CropClaims for crop losses). It has no wallets, no gas sponsorship, no Mobile Money collection and no minting. Its write object is built from a one-function interface, and `test/ussd.test.js` scans the source for every state-changing method and fuzzes the menus to prove no policy, asset, claim-other-than-requested or token balance can change.
 * Vets sign claims on the web portal, not on USSD.
+* **Languages: English and Kinyarwanda.** The first screen of a call (welcome, PIN setup or main menu) ends with **0. Ikinyarwanda** (or **0. English**). The choice is kept per phone number (table `ussd_lang`) and also sets the language of the SMS that farmer receives: codes, policy, claim, payout, contract and Mobile Money messages. Messages to agents stay in English. Numbers that never chose use `USSD_DEFAULT_LANG` (`en`, or `rw`). Texts: `services/ussd-text.js` (screens, 182 characters max) and `services/sms-text.js` (SMS, 160 max); `test/ussd-text.test.js` and `test/sms-text.test.js` check both languages have every text and that they fit.
 * Tests: `npm test` includes `test/ussd.test.js` and `test/phone-accounts.test.js`.
 
 ## Phone accounts (farmers with a basic phone)
@@ -115,7 +116,7 @@ are present they are used before Africa's Talking (`SMS_PROVIDER` picks explicit
 * **Delivery status:** Intouch has no delivery webhook, so the notifier asks `POST /api/getsmsstatus/.json` about each sent message at most once a minute for up to 2 days: `D` delivered, `E` / `U` undeliverable, `P` / `Q` / `S` still on the way.
 * **Retries:** server errors and network failures are retried; a refused request (HTTP 400, e.g. no balance or a wrong sender) is recorded with Intouch's reason and not retried.
 * **If the first real message fails:** their documentation disagrees with itself. Try `INTOUCH_FORMAT=json` (JSON body instead of form fields) or `INTOUCH_RECIPIENT_FORMAT=local` (`0788…`) / `plus` (`+250788…`), and check `error` in the outbox:
-  `sqlite3 web/.data/farmledger.db "select datetime(created_at/1000,'unixepoch'), status, provider_status, error from sms_outbox order by id desc limit 3"`
+  `psql "$DATABASE_URL" -c "select to_timestamp(created_at/1000), status, provider_status, error from sms_outbox order by id desc limit 3"`
 * Tested against a local fake of their API (`test/intouch.test.js`). The first real send with your account is the real test.
 
 ## SMS menu channel (any basic phone, no USSD shortcode)

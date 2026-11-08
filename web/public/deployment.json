@@ -2,6 +2,14 @@
   "network": "localhost",
   "chainId": 31337,
   "rpcUrl": "http://127.0.0.1:8545",
+  "chainName": "FarmLedger network",
+  "nativeCurrency": {
+    "name": "Ether",
+    "symbol": "ETH",
+    "decimals": 18
+  },
+  "explorer": null,
+  "deployBlock": 0,
   "token": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
   "ledger": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
   "cropClaims": "0xB7f8BC63BbcaD18155201308C8f3540b07f84F5e",
@@ -22,5 +30,5 @@
     "paymaster": "0x3Aa5ebB10DC797CAC828524e59A333d0A371443c",
     "bundlerUrl": "http://localhost:4337"
   },
-  "deployedAt": "2026-11-08T11:15:23.023Z"
+  "deployedAt": "2026-11-12T09:34:11.611Z"
 }
