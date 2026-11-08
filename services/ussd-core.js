@@ -31,8 +31,15 @@
 // registered on the web. Registering a claim also needs a 4-digit PIN (3 wrong tries lock the number for 30
 // minutes). A PIN alone is weak: production needs operator-grade controls (SIM-swap checks, rate limits).
 // Screens are kept under 182 characters (the USSD limit).
+//
+// Languages: English and Kinyarwanda (services/ussd-text.js). The first screen of a session (welcome, PIN setup or
+// main menu) offers "0" to switch; the choice is remembered per phone number (services/lang.js) and also sets the
+// language of the farmer's SMS (services/sms-text.js). New numbers start in USSD_DEFAULT_LANG (en).
 const crypto = require("crypto");
 const { ethers } = require("ethers");
+const { TEXT } = require("./ussd-text");
+const { SMS } = require("./sms-text");
+const lang = require("./lang");
 
 const hashOf = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
 const fromB32 = (x) => { try { return ethers.decodeBytes32String(x); } catch { return x; } };
@@ -41,31 +48,11 @@ const date = (ts) => new Date(Number(ts) * 1000).toLocaleDateString("en-GB");
 const CON = (m) => "CON " + m;
 const END = (m) => "END " + m;
 
-const COVER = ["Drought", "Flood", "Crop stress", "Cattle death"];
-const STATUS = ["Active", "Claim pending", "Paid out", "Expired"];
 const WRITE_SURFACE = ["fileClaimFor"]; // the ONLY state-changing call this service can make
-
-const WELCOME = "Welcome to FarmLedger\n1. Register\n2. I changed my number";
-const NO_MATCH = "No phone account matches that number and ID. If you registered on the website, change your number there.";
-const NOT_REGISTERED = "This number is not registered. Register and buy cover on the FarmLedger website or at an agent. USSD is for checking cover and claims.";
-
-const FRIENDLY = {
-  WaitingPeriodNotElapsed: "Claims are not open yet for this policy.",
-  PolicyNotActive: "This policy is not active.",
-  OutsidePolicyPeriod: "The cover period has ended.",
-  WrongAssetType: "This cover pays automatically. No claim needed.",
-  EnforcedPause: "Service is paused. Try later.",
-  AccessControlUnauthorizedAccount: "Service is not set up. Try later.",
-  IdAlreadyUsed: "This National ID is already registered.",
-  TagAlreadyRegistered: "This ear tag is already registered.",
-  AssetAlreadyCovered: "This animal already has cover.",
-  InsufficientPool: "The insurer cannot cover that amount now. Try a smaller amount.",
-  ProductInactive: "This cover is not offered at the moment.",
-  AlreadyRegistered: "This number is already registered.",
-};
 
 function createUssd(opts) {
   const { provider, abi, ledgerAddress, cropClaimsAddress = null, deskAddress = null, agent, accounts = null, payments = null, db = require("../web/server/db").get() } = opts;
+  const defaultLang = lang.defaultLang(opts.defaultLang);
   const deskRO = deskAddress && abi.policyDesk ? new ethers.Contract(deskAddress, abi.policyDesk, provider) : null;
   const { PROVINCES } = require("../web/shared/districts");
   const profiles = require("../web/server/profiles");
@@ -83,6 +70,16 @@ function createUssd(opts) {
   // ---------------------------------------------------------------- PINs (services/pins.js, shared with the portal)
   // Wrong National IDs count like wrong PINs (3 -> locked for 30 minutes), so IDs cannot be guessed by redialling.
   const { getUser, setPin, checkPin, isLocked, failAttempt } = require("./pins").createPinStore({ db });
+
+  // ---------------------------------------------------------------- language (per phone number)
+  // "0" on a first screen: switch to the other language, remember it, and show the same screen again.
+  async function switchLang(env, consumed) {
+    env.lang = env.lang === "en" ? "rw" : "en";
+    env.s = TEXT[env.lang];
+    await lang.setLang(db, env.phone, env.lang);
+    consumed();
+  }
+  const withSwitch = (env, screen) => `${screen}\n${env.s.switchTo}`;
 
   // ---------------------------------------------------------------- identity: phone -> registered farmer
   const normalize = (p) => String(p || "").replace(/\D/g, "");
@@ -120,10 +117,10 @@ function createUssd(opts) {
   const pickIndex = (v, len) => { const n = Number(v); return Number.isInteger(n) && n >= 1 && n <= len ? n - 1 : -1; };
   async function needPin(env) {
     const p = env.next();
-    if (p === undefined) return CON("Enter your PIN to confirm");
-    const r = checkPin(env.phone, p);
+    if (p === undefined) return CON(env.s.enterPin);
+    const r = await checkPin(env.phone, p);
     if (r.ok) return null;
-    return END(r.locked ? "Too many wrong PINs. Number locked for 30 minutes." : "Wrong PIN.");
+    return END(r.locked ? env.s.pinLocked : env.s.wrongPin);
   }
 
   async function describeAsset(policy, prod) {
@@ -144,27 +141,29 @@ function createUssd(opts) {
 
   // ---------------------------------------------------------------- 1. My policies (read-only)
   async function myPolicies(env) {
+    const s = env.s;
     const all = await policiesOf(env.addr);
-    if (!all.length) return END("You have no policies yet. Buy cover on the FarmLedger website or at an agent.");
+    if (!all.length) return END(s.noPolicies);
     const shown = all.slice(0, 5);
     const a = env.next();
-    if (a === undefined) return list("Your policies:", shown.map((p) => `#${p.id} ${COVER[p.cover]} ${STATUS[p.status]}`));
-    const i = pickIndex(a, shown.length); if (i < 0) return END("Invalid choice.");
+    if (a === undefined) return list(s.yourPolicies, shown.map((p) => `#${p.id} ${s.coverShort[p.cover]} ${s.status[p.status]}`));
+    const i = pickIndex(a, shown.length); if (i < 0) return END(s.invalid);
     const p = shown[i];
     const lines = [
-      `Policy #${p.id} ${COVER[p.cover]}`,
+      s.policyHead(p.id, s.cover[p.cover]),
       await describeAsset(p.policy, p.prod),
-      `Cover ${fmt(p.policy.sumInsured)} RWF`,
-      `Premium ${fmt(p.policy.premium)} RWF`,
-      `Valid ${date(p.policy.start)} - ${date(p.policy.end)}`,
-      `Status: ${STATUS[p.status]}`,
+      s.coverAmount(fmt(p.policy.sumInsured)),
+      s.premium(fmt(p.policy.premium)),
+      s.valid(date(p.policy.start), date(p.policy.end)),
+      s.statusLine(s.status[p.status]),
     ];
-    if (p.cover !== 3 && p.status === 0) lines.push("Pays by itself on weather data.");
+    if (p.cover !== 3 && p.status === 0) lines.push(s.paysItself);
     return END(lines.join("\n"));
   }
 
   // ---------------------------------------------------------------- 2. Report a claim (registers a claim only)
   async function reportClaim(env) {
+    const s = env.s;
     const all = await policiesOf(env.addr);
     const active = all.filter((p) => p.status === 0);
     const claimable = [];
@@ -173,42 +172,41 @@ function createUssd(opts) {
       else if (cropRO && Number(await cropRO.openClaimOf(p.id)) === 0) claimable.push(p);
     }
     if (!claimable.length) {
-      if (cropRO && active.some((p) => p.cover !== 3)) return END("Your crop cover already has a loss claim being reviewed. Choose 3 to follow it.");
-      return END(active.some((p) => p.cover !== 3)
-        ? "Crop cover pays by itself when weather data triggers it. No claim needed."
-        : "You have no active cattle cover to claim on.");
+      if (cropRO && active.some((p) => p.cover !== 3)) return END(s.cropClaimOpen);
+      return END(active.some((p) => p.cover !== 3) ? s.cropAuto : s.noCattleCover);
     }
     const labels = [];
-    for (const p of claimable) labels.push(`${await describeAsset(p.policy, p.prod)} (policy #${p.id})`);
+    for (const p of claimable) labels.push(s.assetLabel(await describeAsset(p.policy, p.prod), p.id));
     const a = env.next();
-    if (a === undefined) return list(cropRO ? "Claim on which cover?" : "Which animal died?", labels);
-    const i = pickIndex(a, claimable.length); if (i < 0) return END("Invalid choice.");
+    if (a === undefined) return list(cropRO ? s.claimWhich : s.whichAnimal, labels);
+    const i = pickIndex(a, claimable.length); if (i < 0) return END(s.invalid);
     const p = claimable[i];
     const crop = p.cover !== 3;
 
     if (!crop) {
       const opens = Number(p.policy.start) + Number(await ledgerRO.waitingPeriod());
-      if ((await chainNow()) < opens) return END(`Claims for this policy open on ${date(opens)}.`);
+      if ((await chainNow()) < opens) return END(s.claimsOpenOn(date(opens)));
     }
 
     const c = env.next();
-    if (c === undefined) return CON(crop ? `Report a crop loss on ${labels[i]}?\nThe insurer will review it.\n1. Yes\n2. No` : `Report death of ${labels[i]}?\n1. Yes\n2. No`);
-    if (c !== "1") return END("Cancelled.");
+    if (c === undefined) return CON(`${crop ? s.confirmCrop(labels[i]) : s.confirmDeath(labels[i])}\n${s.yesNo}`);
+    if (c !== "1") return END(s.cancelled);
     const pin = await needPin(env); if (pin) return pin;
 
     const evidence = hashOf(`ussd-report:${env.phone}:${p.id}:${Date.now()}`);
     if (crop) {
       const rc = await (await cropAgent.fileClaimFor(p.id, evidence, 0)).wait();
       const ev = rc.logs.map((l) => { try { return cropRO.interface.parseLog(l); } catch { return null; } }).find((x) => x && x.name === "CropClaimFiled");
-      return END(`Loss claim #${ev.args.claimId} registered. The insurer's reviewers will assess it. Dial again and choose 3 to follow it.`);
+      return END(s.cropFiled(ev.args.claimId));
     }
     const rc = await (await claimsAgent.fileClaimFor(p.id, evidence)).wait();
     const ev = rc.logs.map((l) => { try { return ledgerRO.interface.parseLog(l); } catch { return null; } }).find((x) => x && x.name === "ClaimFiled");
-    return END(`Claim #${ev.args.claimId} registered. A vet will verify it. Dial again and choose 3 to follow progress.`);
+    return END(s.deathFiled(ev.args.claimId));
   }
 
   // ---------------------------------------------------------------- 3. Claim status (read-only)
   async function claimStatus(env) {
+    const s = env.s;
     const claims = [];
     for (const e of await ledgerRO.queryFilter(ledgerRO.filters.ClaimFiled(null, null, env.addr), 0, "latest")) {
       const id = Number(e.args.claimId);
@@ -219,168 +217,170 @@ function createUssd(opts) {
       for (const e of await cropRO.queryFilter(cropRO.filters.CropClaimFiled(null, null, env.addr), 0, "latest")) {
         const id = Number(e.args.claimId);
         const c = await cropRO.getClaim(id);
-        claims.push({ kind: "crop", at: e.blockNumber, id, label: "crop loss", c, status: Number(c.status), policyId: Number(c.policyId) });
+        claims.push({ kind: "crop", at: e.blockNumber, id, label: s.cropLoss, c, status: Number(c.status), policyId: Number(c.policyId) });
       }
     }
-    if (!claims.length) return END("You have no claims.");
+    if (!claims.length) return END(s.noClaims);
     claims.sort((x, y) => y.at - x.at);
     const shown = claims.slice(0, 5);
-    const word = (x) => (x.kind === "vet"
-      ? (x.status === 1 ? "Awaiting vets" : x.status === 2 ? "Approved" : "Rejected")
-      : ["", "Being reviewed", "Approved", "Rejected", "Paid automatically"][x.status]);
-    const name = (x) => (x.kind === "vet" ? `#${x.id} ${x.label}` : `Loss #${x.id}`);
+    const word = (x) => (x.kind === "vet" ? s.vetWord[x.status === 1 || x.status === 2 ? x.status : 3] : s.cropWord[x.status]);
+    const name = (x) => (x.kind === "vet" ? s.vetClaimName(x.id, x.label) : s.cropClaimName(x.id));
     const a = env.next();
-    if (a === undefined) return list("Your claims:", shown.map((x) => `${name(x)} ${word(x)}`));
-    const i = pickIndex(a, shown.length); if (i < 0) return END("Invalid choice.");
+    if (a === undefined) return list(s.yourClaims, shown.map((x) => `${name(x)} ${word(x)}`));
+    const i = pickIndex(a, shown.length); if (i < 0) return END(s.invalid);
     const x = shown[i];
-    const lines = [x.kind === "vet" ? `Claim #${x.id} ${x.label}` : `Loss claim #${x.id}, policy #${x.policyId}`, `Filed ${date(x.c.filedAt)}`];
+    const lines = [x.kind === "vet" ? s.vetClaimHead(x.id, x.label) : s.cropClaimHead(x.id, x.policyId), s.filed(date(x.c.filedAt))];
     if (x.kind === "crop") {
-      if (x.status === 1) lines.push("Status: being reviewed", `Approvals: ${Number(x.c.approvals)} of ${Number(x.c.quorum)} needed`);
-      else if (x.status === 2) lines.push("Status: approved", `${fmt(x.c.amount)} RWF paid to you`);
-      else if (x.status === 3) lines.push("Status: rejected", "Your cover continues.");
-      else lines.push("Status: closed", "The policy was paid automatically.");
+      if (x.status === 1) lines.push(s.stReviewed, s.approvals(Number(x.c.approvals), Number(x.c.quorum)));
+      else if (x.status === 2) lines.push(s.stApproved, s.paidToYou(fmt(x.c.amount)));
+      else if (x.status === 3) lines.push(s.stRejected, s.coverContinues);
+      else lines.push(s.stClosed, s.paidAuto);
     } else if (x.status === 1) {
-      lines.push(`Status: awaiting vets`, `Signatures: ${Number(x.c.approvals)} of ${Number(x.c.quorum)} needed`);
+      lines.push(s.stAwaitingVets, s.signatures(Number(x.c.approvals), Number(x.c.quorum)));
     } else if (x.status === 2) {
       const pol = await ledgerRO.getPolicy(x.policyId);
-      lines.push("Status: approved", `${fmt(pol.sumInsured)} RWF paid to you`);
+      lines.push(s.stApproved, s.paidToYou(fmt(pol.sumInsured)));
     } else {
-      lines.push("Status: rejected", "Your cover continues.");
+      lines.push(s.stRejected, s.coverContinues);
     }
     return END(lines.join("\n"));
   }
 
   // ---------------------------------------------------------------- account services (phone accounts)
-  const codeLimit = (r) => (r.reason === "wait" ? `A code was just sent. Wait ${r.waitS} seconds and dial again.`
-    : r.reason === "not-sent" ? "We could not send the SMS code to this number right now. Please try again later."
-    : "Too many codes today. Try again tomorrow.");
-  const when = (ms) => new Date(ms).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-  const ENTER_CODE = "Enter the 6-digit code from the SMS:\n0. Send a new code";
+  const codeLimit = (s, r) => (r.reason === "wait" ? s.codeWait(r.waitS) : r.reason === "not-sent" ? s.codeNotSent : s.codeDaily);
+  const when = (env, ms) => new Date(ms).toLocaleString("en-GB", env.lang === "en"
+    ? { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }
+    : { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }); // no English month names
   async function resend(env, purpose) {
     const r = await accounts.resendCode(env.phone, purpose);
-    return END(r.ok ? "We sent a new code by SMS. Dial again within 10 minutes and enter it." : codeLimit(r));
+    return END(r.ok ? env.s.codeResent : codeLimit(env.s, r));
   }
   const toIntl = (v) => { const d = normalize(v); return /^07\d{8}$/.test(d) ? "25" + d : d; };
 
   async function newcomer(env, consumed) {
     const phone = env.phone;
-    if (isLocked(phone)) return END("Too many wrong tries. Number locked for 30 minutes.");
-    const mv = accounts.moveTo(phone);
+    if (await isLocked(phone)) return END(env.s.locked);
+    const mv = await accounts.moveTo(phone);
     if (mv) {
-      if (accounts.now() < mv.ready_at) return END(`Your number change is waiting for the safety period. Ready from ${when(mv.ready_at)}.`);
+      if (accounts.now() < mv.ready_at) return END(env.s.moveWaiting(when(env, mv.ready_at)));
       await accounts.completeMove(mv.id);
       consumed();
-      return CON("Your account is now on this number.\nChoose a 4-digit PIN to protect it:");
+      return CON(env.s.movedHere);
     }
-    if (accounts.pendingCode(phone, "move")) return enterMoveCode(env, consumed);
-    if (accounts.pendingCode(phone, "register") || accounts.verifiedCode(phone, "register")) return finishRegistration(env, consumed);
+    if (await accounts.pendingCode(phone, "move")) return enterMoveCode(env, consumed);
+    if ((await accounts.pendingCode(phone, "register")) || (await accounts.verifiedCode(phone, "register"))) return finishRegistration(env, consumed);
 
-    const c = env.next();
-    if (c === undefined) return CON(WELCOME);
+    let c = env.next();
+    if (c === "0") { await switchLang(env, consumed); c = env.next(); }
+    if (c === undefined) return CON(withSwitch(env, env.s.welcome));
     if (c === "1") return startRegistration(env);
     if (c === "2") return startMove(env);
-    return END("Invalid choice.");
+    return END(env.s.invalid);
   }
 
   async function startRegistration(env) {
+    const s = env.s;
     const nid = env.next();
-    if (nid === undefined) return CON("Enter your 16-digit National ID number:");
-    if (!/^\d{16}$/.test(nid)) return END("A National ID has 16 digits. Dial again.");
-    if (await idTaken(nid)) return END("This National ID is already registered. If you changed your number, dial again and choose 2.");
+    if (nid === undefined) return CON(s.enterNid16);
+    if (!/^\d{16}$/.test(nid)) return END(s.nid16);
+    if (await idTaken(nid)) return END(s.nidTaken);
     // the farmer's name, for their agent and the insurer (kept off-chain, web/server/profiles.js)
     const rawName = env.next();
-    if (rawName === undefined) return CON("Enter your full name, as on your ID:");
+    if (rawName === undefined) return CON(s.enterName);
     let name;
-    try { name = profiles.cleanName(rawName); } catch (e) { return END(`${e.message} Dial again.`); }
+    try { name = profiles.cleanName(rawName); } catch (e) { return END(s.badName(e.message)); }
     let district = null; // with PolicyDesk: where the farm is, so the farmer gets the agent covering that district
     if (deskRO) {
       const pv = env.next();
-      if (pv === undefined) return list("Province of your farm:", PROVINCES.map((x) => x[0]));
-      const pi = pickIndex(pv, PROVINCES.length); if (pi < 0) return END("Invalid choice.");
+      if (pv === undefined) return list(s.province, PROVINCES.map((x, k) => s.provinces[k] || x[0]));
+      const pi = pickIndex(pv, PROVINCES.length); if (pi < 0) return END(s.invalid);
       const ds = PROVINCES[pi][1];
       const dv = env.next();
-      if (dv === undefined) return list("District:", ds);
-      const di = pickIndex(dv, ds.length); if (di < 0) return END("Invalid choice.");
+      if (dv === undefined) return list(s.district, ds);
+      const di = pickIndex(dv, ds.length); if (di < 0) return END(s.invalid);
       district = ds[di];
     }
     const ok = env.next();
-    if (ok === undefined) return CON(`Register ${name}, ID ending ${nid.slice(-4)}${district ? `, farm in ${district},` : ""} with this number?\n1. Yes\n2. No`);
-    if (ok !== "1") return END("Cancelled.");
+    if (ok === undefined) return CON(`${s.confirmRegister(name, nid.slice(-4), district)}\n${s.yesNo}`);
+    if (ok !== "1") return END(s.cancelled);
     // only the hash of the ID is kept, and only until the code is used
     const r = await accounts.sendCode(env.phone, "register", { idHash: hashOf(nid), district: district && district.toUpperCase(), name });
-    if (!r.ok) return END(codeLimit(r));
-    return END("We sent you a 6-digit code by SMS. Dial again within 10 minutes and enter it to finish.");
+    if (!r.ok) return END(codeLimit(s, r));
+    return END(s.codeSent);
   }
 
   async function finishRegistration(env, consumed) {
-    if (!accounts.verifiedCode(env.phone, "register")) {
+    const s = env.s;
+    if (!(await accounts.verifiedCode(env.phone, "register"))) {
       const code = env.next();
-      if (code === undefined) return CON(ENTER_CODE);
+      if (code === undefined) return CON(s.enterCode);
       if (code === "0") return resend(env, "register");
-      const r = accounts.checkCode(env.phone, "register", code);
-      if (!r.ok) return END(r.left > 0 ? `Wrong code. ${r.left} tries left. Dial again.` : "That code no longer works. Dial again to start over.");
+      const r = await accounts.checkCode(env.phone, "register", code);
+      if (!r.ok) return END(r.left > 0 ? s.wrongCode(r.left) : s.codeDead);
     }
-    const { data } = accounts.verifiedCode(env.phone, "register");
+    const { data } = await accounts.verifiedCode(env.phone, "register");
     const { account } = await accounts.register(env.phone, data.idHash, data.district || null);
-    if (data.name) profiles.put(account, data.name, db);
-    accounts.clearCode(env.phone, "register");
+    if (data.name) await profiles.put(account, data.name, db);
+    await accounts.clearCode(env.phone, "register");
     consumed();
-    return CON("Registered! Your FarmLedger account is ready.\nChoose a 4-digit PIN to protect it:");
+    return CON(s.registered);
   }
 
   async function startMove(env) {
+    const s = env.s;
     const old = env.next();
-    if (old === undefined) return CON("Enter your OLD phone number, e.g. 0788123456:");
+    if (old === undefined) return CON(s.enterOld);
     const oldPhone = toIntl(old);
-    if (!/^2507\d{8}$/.test(oldPhone) || oldPhone === env.phone) return END("That is not a valid old number. Dial again.");
+    if (!/^2507\d{8}$/.test(oldPhone) || oldPhone === env.phone) return END(s.badOld);
     const nid = env.next();
-    if (nid === undefined) return CON("Enter your National ID number:");
+    if (nid === undefined) return CON(s.enterNid);
     const r = await accounts.startMove(oldPhone, env.phone, nid);
-    if (r.ok) return END("We sent a 6-digit code by SMS to this phone. Dial again within 10 minutes and enter it.");
-    if (r.reason === "no-match") return END(failAttempt(env.phone) ? "Too many wrong tries. Number locked for 30 minutes." : NO_MATCH);
-    if (r.reason === "pending") return END("A number change for this account is already waiting.");
-    if (r.reason === "taken") return END("This number already has an account.");
-    return END(codeLimit(r));
+    if (r.ok) return END(s.moveCodeSent);
+    if (r.reason === "no-match") return END((await failAttempt(env.phone)) ? s.locked : s.noMatch);
+    if (r.reason === "pending") return END(s.movePending);
+    if (r.reason === "taken") return END(s.numberTaken);
+    return END(codeLimit(s, r));
   }
 
   async function enterMoveCode(env, consumed) {
+    const s = env.s;
     const code = env.next();
-    if (code === undefined) return CON(ENTER_CODE);
+    if (code === undefined) return CON(s.enterCode);
     if (code === "0") return resend(env, "move");
     const r = await accounts.confirmMove(env.phone, code);
-    if (!r.ok) return END(r.left > 0 ? `Wrong code. ${r.left} tries left. Dial again.` : "That code no longer works. Dial again to start over.");
-    if (r.request.status === "done") { consumed(); return CON("Your account is now on this number.\nChoose a 4-digit PIN to protect it:"); }
-    return END(`Request saved. For your safety the account moves from ${when(r.request.ready_at)}. We told your old number. Dial again then.`);
+    if (!r.ok) return END(r.left > 0 ? s.wrongCode(r.left) : s.codeDead);
+    if (r.request.status === "done") { consumed(); return CON(s.movedHere); }
+    return END(s.moveSaved(when(env, r.request.ready_at)));
   }
 
   async function resetPin(env) {
-    if (isLocked(env.phone)) return END("Too many wrong tries. Number locked for 30 minutes.");
+    const s = env.s;
+    if (await isLocked(env.phone)) return END(s.locked);
     const nid = env.next();
-    if (nid === undefined) return CON("Enter your National ID number:");
+    if (nid === undefined) return CON(s.enterNid);
     if ((await ledgerRO.getFarmer(env.addr)).idHash !== hashOf(nid)) {
-      return END(failAttempt(env.phone) ? "Too many wrong tries. Number locked for 30 minutes." : "That ID does not match this account.");
+      return END((await failAttempt(env.phone)) ? s.locked : s.idMismatch);
     }
     const p1 = env.next();
-    if (p1 === undefined) return CON("Choose a new 4-digit PIN:");
-    if (!/^\d{4}$/.test(p1)) return END("PIN must be 4 digits.");
+    if (p1 === undefined) return CON(s.newPin);
+    if (!/^\d{4}$/.test(p1)) return END(s.pinDigits);
     const p2 = env.next();
-    if (p2 === undefined) return CON("Repeat the new PIN:");
-    if (p1 !== p2) return END("PINs did not match. Dial again.");
-    setPin(env.phone, p1);
-    await accounts.notify(env.phone, "FarmLedger: your USSD PIN was changed. If this was not you, contact FarmLedger support.");
-    return END("PIN changed.");
+    if (p2 === undefined) return CON(s.repeatNewPin);
+    if (p1 !== p2) return END(s.pinMismatch);
+    await setPin(env.phone, p1);
+    await accounts.notify(env.phone, SMS[env.lang].pinChanged);
+    return END(s.pinChanged);
   }
 
   async function cancelMove(env, mv) {
     const c = env.next();
-    if (c === undefined) return CON("Cancel moving your account to another number?\n1. Yes, cancel it\n2. No");
-    if (c !== "1") return END("Nothing changed.");
+    if (c === undefined) return CON(env.s.confirmCancelMove);
+    if (c !== "1") return END(env.s.nothingChanged);
     await accounts.cancelMove(mv.id, "old number");
-    return END("Number change cancelled. Your account stays on this number.");
+    return END(env.s.moveCancelled);
   }
 
   // ---------------------------------------------------------------- offers and agent (PolicyDesk)
-  const COVER_NAME = ["Drought", "Flood", "Crop stress", "Cattle death"];
   const OFFERED = 2;
 
   // Contracts the underwriter drafted for this farmer that can still be accepted, newest first.
@@ -399,53 +399,59 @@ function createUssd(opts) {
   }
 
   async function myOffers(env) {
+    const s = env.s;
     const offers = (await openOffers(env.addr)).slice(0, 5);
-    if (!offers.length) return END("You have no contract to review. Your agent applies for cover for you; you will get an SMS when a contract is ready.");
+    if (!offers.length) return END(s.noOffers);
     const c = env.next();
-    if (c === undefined) return list("Contracts to review:", offers.map((o) => `#${o.id} ${COVER_NAME[o.cover]} ${fmt(o.a.sumInsured)} RWF`));
-    const i = pickIndex(c, offers.length); if (i < 0) return END("Invalid choice.");
+    if (c === undefined) return list(s.offersHead, offers.map((o) => s.offerLine(o.id, s.coverShort[o.cover], fmt(o.a.sumInsured))));
+    const i = pickIndex(c, offers.length); if (i < 0) return END(s.invalid);
     const o = offers[i];
     const subsidy = await ledgerRO.subsidyFor(env.addr, o.a.productId, o.a.premium).catch(() => 0n);
     const pays = o.a.premium - subsidy;
-    const starts = Number(o.a.startAt) ? `from ${date(o.a.startAt)}` : "from payment";
-    const head = `Contract #${o.id}: ${COVER_NAME[o.cover]}, cover ${fmt(o.a.sumInsured)} RWF, ${Number(o.a.coverDays)} days ${starts}.\nPremium ${fmt(o.a.premium)}${subsidy > 0n ? `, subsidy -${fmt(subsidy)}` : ""}. You pay ${fmt(pays)}.\nValid to ${date(o.a.offerExpires)}`;
-    if (!isPhoneAccount(env)) return END(`${head}\nAccept and pay on the FarmLedger website.`);
+    const starts = Number(o.a.startAt) ? s.fromDate(date(o.a.startAt)) : s.fromPayment;
+    const head = [
+      s.offerHead(o.id, s.cover[o.cover], fmt(o.a.sumInsured), Number(o.a.coverDays), starts),
+      s.offerPay(fmt(o.a.premium), subsidy > 0n ? fmt(subsidy) : null, fmt(pays)),
+      s.validTo(date(o.a.offerExpires)),
+    ].join("\n");
+    if (!(await isPhoneAccount(env))) return END(`${head}\n${s.payOnWeb}`);
     const d = env.next();
-    if (d === undefined) return CON(`${head}\n1. Pay by MoMo\n2. Decline`);
+    if (d === undefined) return CON(`${head}\n${s.payOrDecline}`);
     if (d === "1") {
-      if (!payments) return END("Payment is not available right now. Try again later.");
+      if (!payments) return END(s.payUnavailable);
       const pin = await needPin(env); if (pin) return pin;
       const r = await payments.startPremium({ phone: env.phone, applicationId: o.id });
-      if (r.status === "failed") return END("The Mobile Money payment could not be started. Nothing was charged. Try again later.");
-      return END(`Approve the MoMo payment of ${fmt(r.farmerPays)} RWF on your phone. Your policy is issued once it is paid; we will SMS you.`);
+      if (r.status === "failed") return END(s.payFailed);
+      return END(s.payApprove(fmt(r.farmerPays)));
     }
     if (d === "2") {
       const ok = env.next();
-      if (ok === undefined) return CON(`Decline contract #${o.id}? Your agent can apply again later.\n1. Yes, decline\n2. No`);
-      if (ok !== "1") return END("Nothing changed.");
+      if (ok === undefined) return CON(s.confirmDecline(o.id));
+      if (ok !== "1") return END(s.nothingChanged);
       const pin = await needPin(env); if (pin) return pin;
       await accounts.declineOffer(env.phone, o.id);
-      return END(`Contract #${o.id} declined.`);
+      return END(s.declined(o.id));
     }
-    return END("Invalid choice.");
+    return END(s.invalid);
   }
 
   async function myAgent(env) {
     const agentAddr = await deskRO.agentOf(env.addr);
-    if (agentAddr === ethers.ZeroAddress) return END("No agent is assigned to you yet. FarmLedger will SMS you when one is.");
-    const c = db.prepare("SELECT phone FROM contacts WHERE lower(address) = lower(?)").get(agentAddr);
-    return END(`Your FarmLedger agent${c ? ` can be reached on +${c.phone}` : " has no phone number on file yet"}. They collect your details and apply for cover for you.`);
+    if (agentAddr === ethers.ZeroAddress) return END(env.s.noAgent);
+    const c = await db.one("SELECT phone FROM contacts WHERE lower(address) = lower(?)", [agentAddr]);
+    return END(env.s.agentInfo(c ? c.phone : null));
   }
 
   // ---------------------------------------------------------------- PIN setup (first call only)
-  function pinSetup(env) {
-    const p1 = env.next();
-    if (p1 === undefined) return CON("Choose a 4-digit PIN to protect your claims:");
-    if (!/^\d{4}$/.test(p1)) return END("PIN must be 4 digits.");
+  async function pinSetup(env, consumed) {
+    let p1 = env.next();
+    if (p1 === "0") { await switchLang(env, consumed); p1 = env.next(); }
+    if (p1 === undefined) return CON(withSwitch(env, env.s.choosePin));
+    if (!/^\d{4}$/.test(p1)) return END(env.s.pinDigits);
     const p2 = env.next();
-    if (p2 === undefined) return CON("Repeat your PIN:");
-    if (p1 !== p2) return END("PINs did not match. Dial again.");
-    setPin(env.phone, p1);
+    if (p2 === undefined) return CON(env.s.repeatPin);
+    if (p1 !== p2) return END(env.s.pinMismatch);
+    await setPin(env.phone, p1);
     return null;
   }
 
@@ -462,35 +468,42 @@ function createUssd(opts) {
     return m ? m[1] : undefined;
   }
 
-  const MENU = "FarmLedger\n1. My policies\n2. Report a claim\n3. Claim status";
   // Paying and declining need the farmer's own key, which the server holds only for phone accounts.
-  const isPhoneAccount = (env) => Boolean(accounts && accounts.accountOf(env.phone)?.status === "active");
-  const menuFor = (env) => (accounts
-    ? MENU + "\n4. Reset PIN" + (accounts.moveFrom(env.phone) ? "\n5. Cancel number change" : "") + (deskRO ? "\n6. My offers\n7. My agent" : "")
-    : MENU + (deskRO ? "\n6. My offers\n7. My agent" : ""));
+  const isPhoneAccount = async (env) => Boolean(accounts && (await accounts.accountOf(env.phone))?.status === "active");
+  async function menuFor(env) {
+    const m = env.s.menu;
+    const items = [["1", m.policies], ["2", m.claim], ["3", m.status]];
+    if (accounts) {
+      items.push(["4", m.resetPin]);
+      if (await accounts.moveFrom(env.phone)) items.push(["5", m.cancelMove]);
+    }
+    if (deskRO) items.push(["6", m.offers], ["7", m.agent]);
+    return withSwitch(env, [env.s.menuHead, ...items.map(([k, t]) => `${k}. ${t}`)].join("\n"));
+  }
 
   async function route(env, consumed) {
     const addr = await farmerByPhone(env.phone);
-    if (!addr) return accounts ? newcomer(env, consumed) : END(NOT_REGISTERED);
+    if (!addr) return accounts ? newcomer(env, consumed) : END(env.s.notRegistered);
     env.addr = addr;
-    if (!getUser(env.phone).pinHash) {
-      const r = pinSetup(env);
+    if (!(await getUser(env.phone)).pinHash) {
+      const r = await pinSetup(env, consumed);
       if (r) return r;
       consumed();
-      return CON("PIN saved.\n" + menuFor(env));
+      return CON(`${env.s.pinSaved}\n${await menuFor(env)}`);
     }
-    const choice = env.next();
-    if (choice === undefined) return CON(menuFor(env));
+    let choice = env.next();
+    if (choice === "0") { await switchLang(env, consumed); choice = env.next(); }
+    if (choice === undefined) return CON(await menuFor(env));
     switch (choice) {
       case "1": return myPolicies(env);
       case "2": return reportClaim(env);
       case "3": return claimStatus(env);
       case "4": if (accounts) return resetPin(env); break;
-      case "5": { const mv = accounts && accounts.moveFrom(env.phone); if (mv) return cancelMove(env, mv); break; }
+      case "5": { const mv = accounts && (await accounts.moveFrom(env.phone)); if (mv) return cancelMove(env, mv); break; }
       case "6": if (deskRO) return myOffers(env); break;
       case "7": if (deskRO) return myAgent(env); break;
     }
-    return END("Invalid choice.");
+    return END(env.s.invalid);
   }
 
   // ---------------------------------------------------------------- entry point
@@ -508,15 +521,17 @@ function createUssd(opts) {
     const all = text ? String(text).split("*") : [];
     let parts = all.slice(sess.skip);
     let i = 0;
-    const env = { phone, next: () => parts[i++] };
+    const env = { phone, lang: defaultLang, s: TEXT[defaultLang], next: () => parts[i++] };
 
     let reply;
     try {
+      env.lang = await lang.langOf(db, phone, defaultLang);
+      env.s = TEXT[env.lang];
       reply = await route(env, () => { sess.skip += i; parts = parts.slice(i); i = 0; });
     } catch (e) {
       const name = errorName(e);
-      reply = END(FRIENDLY[name] || "Service busy. Please try again.");
-      if (!FRIENDLY[name]) console.error("[ussd] error:", e.shortMessage || e.message);
+      reply = END(env.s.friendly[name] || env.s.busy);
+      if (!env.s.friendly[name]) console.error("[ussd] error:", e.shortMessage || e.message);
     }
     if (reply.startsWith("END")) sessions.delete(sessionId);
     replyCache.set(cacheKey, { reply, at: Date.now() });
