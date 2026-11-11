@@ -97,10 +97,11 @@ describe("Mobile Money (phone accounts, USSD, contracts drafted by the underwrit
 
   it("USSD registration asks for the farm's province and district", async () => {
     const N = "250783000777";
-    expect(await dial(["1", "1199580011112222"], N)).to.equal("CON Province of your farm:\n1. Kigali City\n2. Northern\n3. Southern\n4. Eastern\n5. Western");
-    expect(await dial(["1", "1199580011112222", "4"], N)).to.match(/^CON District:\n1\. Bugesera\n2\. Gatsibo/);
-    expect(await dial(["1", "1199580011112222", "4", "1"], N)).to.equal("CON Register ID ending 2222, farm in Bugesera, with this number?\n1. Yes\n2. No");
-    await dial(["1", "1199580011112222", "4", "1", "1"], N);
+    expect(await dial(["1", "1199580011112222"], N)).to.equal("CON Enter your full name, as on your ID:");
+    expect(await dial(["1", "1199580011112222", "Uwase Diane"], N)).to.equal("CON Province of your farm:\n1. Kigali City\n2. Northern\n3. Southern\n4. Eastern\n5. Western");
+    expect(await dial(["1", "1199580011112222", "Uwase Diane", "4"], N)).to.match(/^CON District:\n1\. Bugesera\n2\. Gatsibo/);
+    expect(await dial(["1", "1199580011112222", "Uwase Diane", "4", "1"], N)).to.equal("CON Register Uwase Diane, ID ending 2222, farm in Bugesera, with this number?\n1. Yes\n2. No");
+    await dial(["1", "1199580011112222", "Uwase Diane", "4", "1", "1"], N);
     const code = /code: (\d{6})/.exec(sms.filter((m) => m.phone === N).at(-1).text)[1];
     await dial([code], N);
     expect(await ctx.desk.agentOf(accounts.accountOf(N).account)).to.equal(ctx.agent.address);

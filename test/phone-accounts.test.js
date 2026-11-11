@@ -8,6 +8,7 @@ const { ethers, loadFixture, hash, farmerFixture } = require("./helpers");
 const uo = require("../web/shared/userop");
 const dbm = require("../web/server/db");
 const contacts = require("../web/server/contacts");
+const profiles = require("../web/server/profiles");
 const { createUssd } = require("../services/ussd-core");
 const { createPhoneAccounts, CODE_TRIES } = require("../services/phone-accounts");
 
@@ -16,6 +17,7 @@ const NID = "1199580012345678";
 const OTHER = "250788000600"; // the same farmer's next SIM
 const ALINE = "250788000001"; // registered on the web with her own key (farmerFixture)
 const PIN = "4321";
+const NAME = "Mukamana Claudette";
 const HOUR = 3600 * 1000;
 
 async function fixture() {
@@ -72,7 +74,7 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
   }
   const lastCode = (phone) => /code: (\d{6})/.exec([...sms].reverse().find((m) => m.phone === phone).text)[1];
   async function registerByUssd(phone = NEW, nid = NID) {
-    expect(await dial(phone, ["1", nid, "1"])).to.match(/^END We sent you a 6-digit code/);
+    expect(await dial(phone, ["1", nid, NAME, "1"])).to.match(/^END We sent you a 6-digit code/);
     expect(await dial(phone, [lastCode(phone), PIN, PIN])).to.match(/^CON PIN saved\./);
     return accounts.accountOf(phone).account;
   }
@@ -81,8 +83,9 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
     it("a new number registers with its National ID and an SMS code, then sets a PIN; the farmer pays no fees", async () => {
       expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number");
       expect(await dial(NEW, ["1"])).to.match(/National ID/);
-      expect(await dial(NEW, ["1", NID])).to.equal("CON Register ID ending 5678 with this number?\n1. Yes\n2. No");
-      expect(await dial(NEW, ["1", NID, "1"])).to.match(/^END We sent you a 6-digit code by SMS/);
+      expect(await dial(NEW, ["1", NID])).to.equal("CON Enter your full name, as on your ID:");
+      expect(await dial(NEW, ["1", NID, NAME])).to.equal(`CON Register ${NAME}, ID ending 5678 with this number?\n1. Yes\n2. No`);
+      expect(await dial(NEW, ["1", NID, NAME, "1"])).to.match(/^END We sent you a 6-digit code by SMS/);
       expect(sms).to.have.length(1);
       expect(sms[0].phone).to.equal(NEW);
       expect(sms[0].text).to.not.include(NID); // the code SMS never repeats the ID
@@ -99,6 +102,8 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
       expect(await ethers.provider.getCode(account)).to.not.equal("0x"); // the smart account was deployed by that operation
       expect(await ethers.provider.getBalance(account)).to.equal(0n);
       expect(contacts.read(db)[account.toLowerCase()].phone).to.equal(NEW); // payout SMS will find the number
+      expect(profiles.get(account, db)).to.equal(NAME); // the name, off-chain only
+      expect(f.toArray().map(String).join(" ")).to.not.include(NAME);
 
       // PIN, then the full menu with account services
       expect(await dial(NEW, [PIN])).to.equal("CON Repeat your PIN:");
@@ -124,12 +129,12 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
     it("refuses a malformed or already registered National ID before sending any SMS", async () => {
       expect(await dial(NEW, ["1", "12345"])).to.match(/^END A National ID has 16 digits/);
       expect(await dial(NEW, ["1", "1199080012345678"])).to.match(/^END This National ID is already registered/); // Aline's
-      expect(await dial(NEW, ["1", NID, "2"])).to.equal("END Cancelled.");
+      expect(await dial(NEW, ["1", NID, NAME, "2"])).to.equal("END Cancelled.");
       expect(sms).to.have.length(0);
     });
 
     it("codes: limited tries, expire after 10 minutes, at most one per minute and five a day", async () => {
-      await dial(NEW, ["1", NID, "1"]);
+      await dial(NEW, ["1", NID, NAME, "1"]);
       expect(await dial(NEW, [])).to.match(/^CON Enter the 6-digit code/); // a pending code: the next dial asks for it
       const good = lastCode(NEW);
       const bad = good === "000000" ? "111111" : "000000";
@@ -137,12 +142,12 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
       expect(await dial(NEW, [bad])).to.match(/no longer works/);
       expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number");
 
-      expect(await dial(NEW, ["1", NID, "1"])).to.match(/Wait \d+ seconds/); // resend throttle, even for a voided code
+      expect(await dial(NEW, ["1", NID, NAME, "1"])).to.match(/Wait \d+ seconds/); // resend throttle, even for a voided code
       clock += 61_000;
-      await dial(NEW, ["1", NID, "1"]); // code 2
+      await dial(NEW, ["1", NID, NAME, "1"]); // code 2
       clock += 11 * 60_000; // expired
       expect(await dial(NEW, [])).to.match(/^CON Welcome/);
-      await dial(NEW, ["1", NID, "1"]); // code 3
+      await dial(NEW, ["1", NID, NAME, "1"]); // code 3
       expect(await dial(NEW, ["0"])).to.match(/Wait \d+ seconds/);
       clock += 61_000;
       expect(await dial(NEW, ["0"])).to.equal("END We sent a new code by SMS. Dial again within 10 minutes and enter it."); // code 4
@@ -161,7 +166,7 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
         sendSms: async () => ({ ok: false, skipped: true }), transport: transport(ctx.entryPoint, ctx.relayer), now: () => clock,
       });
       u = createUssd({ provider: ethers.provider, abi, ledgerAddress: ctx.ledgerAddr, agent: ctx.agent, accounts, db });
-      expect(await dial(NEW, ["1", NID, "1"])).to.equal("END We could not send the SMS code to this number right now. Please try again later.");
+      expect(await dial(NEW, ["1", NID, NAME, "1"])).to.equal("END We could not send the SMS code to this number right now. Please try again later.");
       expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number");
     });
 

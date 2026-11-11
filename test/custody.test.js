@@ -43,7 +43,14 @@ describe("Key custody service", function () {
     expect(check([call(tokenAddr, T, "transfer", [ctx.treasury.address, 5])])).to.equal(null);
     expect(check([call(tokenAddr, T, "transfer", [ctx.outsider.address, 5])])).to.match(/transfer is not allowed to that address/);
     expect(check([call(tokenAddr, T, "approve", [ctx.outsider.address, 5])])).to.match(/approve is not allowed/);
-    expect(check([call(ctx.ledgerAddr, L, "registerPlot", [0, 0, 1, hash("x"), hash("y")])])).to.match(/registerPlot is not allowed/);
+    // a farmer signed in on the portal records their own farm and claims (same account as on USSD)
+    expect(check([call(ctx.ledgerAddr, L, "registerPlot", [0, 0, 1, hash("x"), hash("y")])])).to.equal(null);
+    expect(check([call(ctx.ledgerAddr, L, "fileClaim", [1, hash("evidence")])])).to.equal(null);
+    // never the insurer's, the oracle's or the admin's operations, and no test money off the local chain
+    expect(check([call(ctx.ledgerAddr, L, "postReading", [1, 0, 100, 1])])).to.match(/postReading is not allowed/);
+    expect(check([call(ctx.ledgerAddr, L, "grantRole", [ethers.ZeroHash, ctx.outsider.address])])).to.match(/grantRole is not allowed/);
+    expect(check([call(tokenAddr, T, "mint", [ctx.outsider.address, 5])])).to.match(/mint is not allowed/);
+    expect(allowedCalls({ abi, ledger: ctx.ledgerAddr, desk: deskAddr, token: tokenAddr, treasury: ctx.treasury.address, local: true })([call(tokenAddr, T, "mint", [ctx.outsider.address, 5])])).to.equal(null);
     expect(check([call(deskAddr, D, "submitApplication", [ctx.outsider.address, 1, 1, 1, 0, 0, 120, hash("f")])])).to.match(/not allowed/);
     expect(check([{ to: ctx.outsider.address, data: "0x12345678" }])).to.match(/is not allowed/);
     expect(check([])).to.match(/1 to 4 calls/);
