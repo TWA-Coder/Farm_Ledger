@@ -4,9 +4,10 @@ const path = require("path");
 const { ethers } = require("ethers");
 
 const ROOT = path.join(__dirname, "..");
-// Settings (Africa's Talking keys, CALLBACK_TOKEN, ...) from the git-ignored .env at the repository root.
+// Settings from the git-ignored .env (shared) and .env.<NETWORK> (that network's keys), see env.js.
 // Variables already set in the shell win.
-require("dotenv").config({ path: path.join(ROOT, ".env") });
+require("./env").loadEnv();
+require("./rpc").applyRpcEnv(); // RPC_URL from ALCHEMY_API_KEY when NETWORK is a public network
 
 function loadDeployment() {
   const network = process.env.NETWORK || "localhost";
