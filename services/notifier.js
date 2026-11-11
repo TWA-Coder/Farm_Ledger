@@ -30,7 +30,7 @@ async function main() {
     console.log(ref ? `  MoMo payout ${ref.slice(0, 8)}: ${amount} RWF -> +${phone} (policy #${policyId})`
       : `  payout for policy #${policyId} stays in the farmer's own wallet (not a phone account)`);
   };
-  const notifier = createNotifier({ provider, ledger, cropClaims, desk, outbox, onPayout });
+  const notifier = createNotifier({ provider, ledger, cropClaims, desk, outbox, onPayout, startBlock: dep.deployBlock });
   if (payments) console.log(`Mobile Money: ${payments.mode}`);
   console.log(`Notifier on ${dep.ledger}${cropClaims ? ` + CropClaims ${dep.cropClaims}` : ""} · SMS: ${outbox.describe}`);
 

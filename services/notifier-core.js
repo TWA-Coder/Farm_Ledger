@@ -20,7 +20,7 @@ const CROP_STATUS = { Approved: 2, Rejected: 3, Superseded: 4 };
 
 const COVER = ["drought", "flood", "crop stress", "cattle"];
 
-function createNotifier({ db = dbm.get(), provider, ledger, cropClaims = null, desk = null, outbox, onPayout = null, history = process.env.NOTIFY_HISTORY }) {
+function createNotifier({ db = dbm.get(), provider, ledger, cropClaims = null, desk = null, outbox, onPayout = null, history = process.env.NOTIFY_HISTORY, startBlock = 0 }) {
   async function phoneOf(address) {
     const c = contacts.read(db)[String(address).toLowerCase()];
     if (c) return c.phone;
@@ -119,7 +119,7 @@ function createNotifier({ db = dbm.get(), provider, ledger, cropClaims = null, d
   }
 
   async function tick() {
-    await indexer.sync({ db, provider, ledger, others: [cropClaims, desk].filter(Boolean) });
+    await indexer.sync({ db, provider, ledger, others: [cropClaims, desk].filter(Boolean), startBlock });
     let queued = 0, noPhone = 0;
     for (const e of indexer.events(db, { after: cursor() })) {
       const msgs = await messagesFor(e); // chain reads happen before the transaction; a failure retries next tick
