@@ -43,7 +43,6 @@ const END = (m) => "END " + m;
 
 const COVER = ["Drought", "Flood", "Crop stress", "Cattle death"];
 const STATUS = ["Active", "Claim pending", "Paid out", "Expired"];
-const LOCK_MS = 30 * 60 * 1000;
 const WRITE_SURFACE = ["fileClaimFor"]; // the ONLY state-changing call this service can make
 
 const WELCOME = "Welcome to FarmLedger\n1. Register\n2. I changed my number";
@@ -69,6 +68,7 @@ function createUssd(opts) {
   const { provider, abi, ledgerAddress, cropClaimsAddress = null, deskAddress = null, agent, accounts = null, payments = null, db = require("../web/server/db").get() } = opts;
   const deskRO = deskAddress && abi.policyDesk ? new ethers.Contract(deskAddress, abi.policyDesk, provider) : null;
   const { PROVINCES } = require("../web/shared/districts");
+  const profiles = require("../web/server/profiles");
   if (!agent) throw new Error("agent wallet (CLAIMS_AGENT_ROLE) is required");
 
   const sessions = new Map();
@@ -80,40 +80,9 @@ function createUssd(opts) {
   const cropRO = cropClaimsAddress && abi.cropClaims ? new ethers.Contract(cropClaimsAddress, abi.cropClaims, provider) : null;
   const cropAgent = cropRO ? new ethers.Contract(cropClaimsAddress, ["function fileClaimFor(uint256 policyId, bytes32 evidenceHash, uint256 requested) returns (uint256)"], agent) : null;
 
-  // ---------------------------------------------------------------- storage (PIN state only; db.js table "ussd_users")
-  const getUser = (phone) => {
-    const r = db.prepare("SELECT * FROM ussd_users WHERE phone = ?").get(phone);
-    return r ? { salt: r.salt, pinHash: r.pin_hash, tries: r.tries, lockedUntil: r.locked_until, pinSetAt: r.pin_set_at } : {};
-  };
-  const putUser = (phone, patch) => {
-    const u = { tries: 0, lockedUntil: 0, ...getUser(phone), ...patch };
-    db.prepare(`INSERT INTO ussd_users (phone, salt, pin_hash, tries, locked_until, pin_set_at) VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(phone) DO UPDATE SET salt = excluded.salt, pin_hash = excluded.pin_hash, tries = excluded.tries,
-      locked_until = excluded.locked_until, pin_set_at = excluded.pin_set_at`)
-      .run(phone, u.salt ?? null, u.pinHash ?? null, u.tries, u.lockedUntil, u.pinSetAt ?? null);
-  };
-
-  const hashPin = (pin, salt) => crypto.createHash("sha256").update(salt + ":" + pin).digest("hex");
-  function setPin(phone, pin) {
-    const salt = crypto.randomBytes(8).toString("hex");
-    putUser(phone, { salt, pinHash: hashPin(pin, salt), tries: 0, lockedUntil: 0, pinSetAt: new Date().toISOString() });
-  }
-  function checkPin(phone, pin) {
-    const u = getUser(phone);
-    if (u.lockedUntil && Date.now() < u.lockedUntil) return { ok: false, locked: true };
-    if (u.pinHash && hashPin(pin, u.salt) === u.pinHash) { putUser(phone, { tries: 0 }); return { ok: true }; }
-    const tries = (u.tries || 0) + 1;
-    putUser(phone, tries >= 3 ? { tries: 0, lockedUntil: Date.now() + LOCK_MS } : { tries });
-    return { ok: false, locked: tries >= 3 };
-  }
-
+  // ---------------------------------------------------------------- PINs (services/pins.js, shared with the portal)
   // Wrong National IDs count like wrong PINs (3 -> locked for 30 minutes), so IDs cannot be guessed by redialling.
-  const isLocked = (phone) => { const u = getUser(phone); return Boolean(u.lockedUntil && Date.now() < u.lockedUntil); };
-  function failAttempt(phone) {
-    const tries = (getUser(phone).tries || 0) + 1;
-    putUser(phone, tries >= 3 ? { tries: 0, lockedUntil: Date.now() + LOCK_MS } : { tries });
-    return tries >= 3;
-  }
+  const { getUser, setPin, checkPin, isLocked, failAttempt } = require("./pins").createPinStore({ db });
 
   // ---------------------------------------------------------------- identity: phone -> registered farmer
   const normalize = (p) => String(p || "").replace(/\D/g, "");
@@ -318,6 +287,11 @@ function createUssd(opts) {
     if (nid === undefined) return CON("Enter your 16-digit National ID number:");
     if (!/^\d{16}$/.test(nid)) return END("A National ID has 16 digits. Dial again.");
     if (await idTaken(nid)) return END("This National ID is already registered. If you changed your number, dial again and choose 2.");
+    // the farmer's name, for their agent and the insurer (kept off-chain, web/server/profiles.js)
+    const rawName = env.next();
+    if (rawName === undefined) return CON("Enter your full name, as on your ID:");
+    let name;
+    try { name = profiles.cleanName(rawName); } catch (e) { return END(`${e.message} Dial again.`); }
     let district = null; // with PolicyDesk: where the farm is, so the farmer gets the agent covering that district
     if (deskRO) {
       const pv = env.next();
@@ -330,10 +304,10 @@ function createUssd(opts) {
       district = ds[di];
     }
     const ok = env.next();
-    if (ok === undefined) return CON(`Register ID ending ${nid.slice(-4)}${district ? `, farm in ${district},` : ""} with this number?\n1. Yes\n2. No`);
+    if (ok === undefined) return CON(`Register ${name}, ID ending ${nid.slice(-4)}${district ? `, farm in ${district},` : ""} with this number?\n1. Yes\n2. No`);
     if (ok !== "1") return END("Cancelled.");
     // only the hash of the ID is kept, and only until the code is used
-    const r = await accounts.sendCode(env.phone, "register", { idHash: hashOf(nid), district: district && district.toUpperCase() });
+    const r = await accounts.sendCode(env.phone, "register", { idHash: hashOf(nid), district: district && district.toUpperCase(), name });
     if (!r.ok) return END(codeLimit(r));
     return END("We sent you a 6-digit code by SMS. Dial again within 10 minutes and enter it to finish.");
   }
@@ -347,7 +321,8 @@ function createUssd(opts) {
       if (!r.ok) return END(r.left > 0 ? `Wrong code. ${r.left} tries left. Dial again.` : "That code no longer works. Dial again to start over.");
     }
     const { data } = accounts.verifiedCode(env.phone, "register");
-    await accounts.register(env.phone, data.idHash, data.district || null);
+    const { account } = await accounts.register(env.phone, data.idHash, data.district || null);
+    if (data.name) profiles.put(account, data.name, db);
     accounts.clearCode(env.phone, "register");
     consumed();
     return CON("Registered! Your FarmLedger account is ready.\nChoose a 4-digit PIN to protect it:");
