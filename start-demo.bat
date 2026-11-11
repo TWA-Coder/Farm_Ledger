@@ -20,7 +20,7 @@ start "FarmLedger phone services" cmd /k npm run phone
 start "FarmLedger web" cmd /k npm run web
 echo.
 echo FarmLedger is starting. In about 20 seconds open:
-echo   Portal           http://localhost:3000/app
+echo   Portal           http://localhost:3000/app   (sign in: demo people are listed on the page)
 echo   Phone simulator  http://localhost:3000/ussd
 timeout /t 20 /nobreak >nul
 start http://localhost:3000/app

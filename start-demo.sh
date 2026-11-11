@@ -38,10 +38,10 @@ cat <<MSG
 
   FarmLedger is running.
     Landing page       http://localhost:3000
-    Portal             http://localhost:3000/app      (pick a demo account at the top)
+    Portal             http://localhost:3000/app      (sign in: demo people are listed on the page)
     Phone simulator    http://localhost:3000/ussd
   Logs in services/out/. Press Ctrl+C to stop everything.
 
 MSG
-if command -v open >/dev/null; then open http://localhost:3000/app; elif command -v xdg-open >/dev/null; then xdg-open http://localhost:3000/app >/dev/null 2>&1 || true; fi
+if command -v open >/dev/null; then open http://localhost:3000/; elif command -v xdg-open >/dev/null; then xdg-open http://localhost:3000/ >/dev/null 2>&1 || true; fi
 wait
