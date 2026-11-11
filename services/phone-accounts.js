@@ -133,6 +133,15 @@ function createPhoneAccounts(opts) {
     return r ? { phone: r.phone, account: r.account, owner: r.owner, status: r.status, createdAt: r.created_at } : null;
   }
 
+  // In-process mode only (the custody service): sign a message as an ACTIVE account. Smart accounts sign with their
+  // owner key; the portal's document checks accept that (documents-core verifyAccountSigner + owner()).
+  function signMessageFor(phone, message) {
+    if (custody) throw new Error("Keys are held by the custody service.");
+    const r = rowOf(phone);
+    if (!r || r.status !== "active") throw new Error("No active phone account for this number.");
+    return new ethers.Wallet(unseal(r)).signMessage(message);
+  }
+
   // In-process mode only (tests, tools): an ethers signer for an ACTIVE account. It never exposes the key.
   function signerFor(phone) {
     if (custody) throw new Error("Keys are held by the custody service: use sendCalls.");
@@ -313,7 +322,7 @@ function createPhoneAccounts(opts) {
     : db.prepare("SELECT * FROM recovery_requests ORDER BY id").all());
 
   return {
-    accountOf, signerFor, sendCalls, register, declineOffer, notify: sendSms,
+    accountOf, signerFor, signMessageFor, sendCalls, register, declineOffer, notify: sendSms,
     keyring: custody ? null : keyring, // the custody service uses the in-process keyring directly
     sendCode, resendCode, pendingCode, verifiedCode, checkCode, clearCode,
     startMove, confirmMove, cancelMove, releaseNow, completeMove, moveTo, moveFrom, requests,
