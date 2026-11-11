@@ -12,6 +12,10 @@
 //   sms_outbox  every SMS: queued -> sent -> delivered/undeliverable, with retries and provider ids (services/sms.js)
 //   momo_payments  MTN MoMo premium collections, payouts and refunds, step by step (services/payments.js)
 //   sms_inbound / sms_sessions  SMS received by the Android gateway phone, and each phone's menu conversation
+//   staff_users  portal logins for admins, underwriters, vets and agents: name, role, password hash and their
+//                blockchain key ENCRYPTED (only the custody service can decrypt it, services/staff-keys.js)
+//   sessions     signed-in portal sessions (staff by username, farmers by phone), keyed by a hash of the cookie
+//   profiles     people's names by account address (names are personal data: never written on-chain)
 //
 // Location: $FARMLEDGER_DB, else web/.data/farmledger.db (git-ignored). WAL mode lets the portal and the services
 // read and write the same file at the same time.
@@ -55,6 +59,14 @@ CREATE TABLE IF NOT EXISTS momo_payments (
 CREATE INDEX IF NOT EXISTS momo_payments_status ON momo_payments (status, updated_at);
 CREATE TABLE IF NOT EXISTS momo_sim (
   ref TEXT PRIMARY KEY, kind TEXT NOT NULL, phone TEXT NOT NULL, amount TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS staff_users (
+  username TEXT PRIMARY KEY, address TEXT NOT NULL UNIQUE, name TEXT NOT NULL, role TEXT NOT NULL, phone TEXT,
+  enc_key TEXT NOT NULL, pw_salt TEXT, pw_hash TEXT, must_change INTEGER NOT NULL DEFAULT 1, tries INTEGER NOT NULL DEFAULT 0,
+  locked_until INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created_by TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions (
+  id_hash TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS sessions_subject ON sessions (kind, subject);
+CREATE TABLE IF NOT EXISTS profiles (address TEXT PRIMARY KEY, name TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recovery_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT, old_phone TEXT NOT NULL, new_phone TEXT NOT NULL, account TEXT NOT NULL,
   status TEXT NOT NULL, created_at INTEGER NOT NULL, ready_at INTEGER, done_at INTEGER, note TEXT);
