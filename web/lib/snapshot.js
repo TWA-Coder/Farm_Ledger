@@ -1,6 +1,7 @@
 "use client";
 import { ethers } from "ethers";
-import { DEMO_ACCOUNTS, fromB32 } from "./chain";
+import { fromB32 } from "./chain";
+import { setNames } from "./format";
 import { reviveArgs } from "../shared/event-json";
 
 export function pick(r) { // ethers Result -> plain object (named fields only)
@@ -12,6 +13,11 @@ export function pick(r) { // ethers Result -> plain object (named fields only)
 // One read of everything the screens need. Kept in one place so every view shows the same numbers.
 export async function loadSnapshot({ ctx, provider, cfg, address, account }) {
   const { ledger, token } = ctx;
+  // names first: every screen built from this snapshot shows people by name (off-chain, server/profiles.js)
+  let names = {};
+  try { names = (await (await fetch("/api/names", { cache: "no-store" })).json()).names || {}; } catch { /* shown as addresses */ }
+  setNames(names);
+  const nameOrNull = (a) => names[String(a).toLowerCase()] || null;
   const latest = await provider.getBlock("latest");
   const [farmer, balance, productCount, plotCount] = await Promise.all([
     ledger.getFarmer(address), token.balanceOf(address), ledger.productCount(), ledger.plotCount(),
@@ -58,14 +64,13 @@ export async function loadSnapshot({ ctx, provider, cfg, address, account }) {
   const vets = await Promise.all(vetAddrs.map(async (a) => {
     const p = pick(await ledger.getVetProfile(a));
     const certified = await ledger.isCertifiedVet(a);
-    const demo = DEMO_ACCOUNTS.find((d) => d.addr?.toLowerCase() === a.toLowerCase());
-    return { address: a, ...p, certified, name: demo?.label || null };
+    return { address: a, ...p, certified, name: nameOrNull(a) };
   }));
   const vetQuorum = Number(await ledger.vetQuorum());
   const myVet = vets.find((v) => v.address.toLowerCase() === address.toLowerCase()) || null;
 
-  const uwAcct = DEMO_ACCOUNTS.find((a) => a.role === "underwriter");
-  const poolOwner = account.role === "underwriter" ? address : uwAcct.addr;
+  // the pool shown to others is the deployment's underwriter (the insurer the portal is set up for)
+  const poolOwner = account.role === "underwriter" ? address : (cfg.dep.roles?.underwriter || address);
   const ps = await ledger.poolStats(poolOwner);
   const pool = { balance: ps.balance, reserved: ps.reserved, available: ps.available, premiums: ps.stats.premiums, paidOut: ps.stats.paidOut, sold: ps.stats.policiesSold, payouts: ps.stats.payouts };
 
@@ -85,10 +90,10 @@ export async function loadSnapshot({ ctx, provider, cfg, address, account }) {
   }
 
   const [allowance, paused, waiting] = await Promise.all([token.allowance(address, cfg.dep.ledger), ledger.paused(), ledger.waitingPeriod()]);
-  const desk = ctx.desk ? await loadDesk({ ctx, events, address, account }) : null;
+  const desk = ctx.desk ? await loadDesk({ ctx, events, address, account, nameOrNull }) : null;
   return {
     now: Number(latest.timestamp), farmer, balance, products, plots, animals, policies, events, claims, vets, vetQuorum, myVet,
-    pool, plotCount: Number(plotCount), allowance, paused, waiting,
+    pool, plotCount: Number(plotCount), allowance, paused, waiting, names,
     applications: desk?.applications || [], myAgent: desk?.myAgent || null, agent: desk?.agent || null,
   };
 }
@@ -96,7 +101,7 @@ export async function loadSnapshot({ ctx, provider, cfg, address, account }) {
 // PolicyDesk: every application with its current status, and for each role what it needs:
 //   farmer: its agent; agent: its insurer and farmers (with their plots and animals); underwriter: its applications.
 const APP_STATUS = ["None", "Submitted", "Offered", "Rejected", "Declined", "Issued"];
-async function loadDesk({ ctx, events, address, account }) {
+async function loadDesk({ ctx, events, address, account, nameOrNull }) {
   const { desk, ledger } = ctx;
   const me = address.toLowerCase();
   const ids = events.filter((e) => e.name === "ApplicationSubmitted").map((e) => Number(e.args.applicationId));
@@ -110,7 +115,7 @@ async function loadDesk({ ctx, events, address, account }) {
   let myAgent = null, agent = null;
   if (account.role === "farmer") {
     const ag = await desk.agentOf(address);
-    myAgent = ag === ethers.ZeroAddress ? null : { address: ag, label: DEMO_ACCOUNTS.find((d) => d.addr?.toLowerCase() === ag.toLowerCase())?.label || ag, district: fromB32(await desk.districtOf(address)) };
+    myAgent = ag === ethers.ZeroAddress ? null : { address: ag, label: nameOrNull(ag) || `Agent ${ag.slice(0, 6)}…${ag.slice(-4)}`, district: fromB32(await desk.districtOf(address)) };
   }
   const info = pick(await desk.getAgent(address));
   if (info.underwriter !== ethers.ZeroAddress) {
@@ -121,8 +126,7 @@ async function loadDesk({ ctx, events, address, account }) {
       const [plotIds, animalIds] = await Promise.all([ledger.plotsOf(f), ledger.animalsOf(f)]);
       const plots = await Promise.all(plotIds.map(async (id) => ({ id: Number(id), ...pick(await ledger.getPlot(id)) })));
       const animals = await Promise.all(animalIds.map(async (id) => ({ id: Number(id), ...pick(await ledger.getAnimal(id)) })));
-      const demo = DEMO_ACCOUNTS.find((d) => d.addr?.toLowerCase() === f.toLowerCase());
-      farmers.push({ address: f, label: demo?.label || `Farmer ${f.slice(0, 6)}…${f.slice(-4)}`, district: fromB32(await desk.districtOf(f)), plots, animals });
+      farmers.push({ address: f, label: nameOrNull(f) || `Farmer ${f.slice(0, 6)}…${f.slice(-4)}`, district: fromB32(await desk.districtOf(f)), plots, animals });
     }
     agent = { underwriter: info.underwriter, active: info.active, districts: (await desk.districtsOfAgent(address)).map(fromB32), farmers };
   }
