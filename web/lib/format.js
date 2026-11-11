@@ -1,4 +1,4 @@
-import { DEMO_ACCOUNTS, COVER, fromB32, short, fmt } from "./chain";
+import { COVER, fromB32, short, fmt } from "./chain";
 
 export const DAY = 86400;
 export const unit = (cover, v) => (Number(cover) === 2 ? (Number(v) / 10000).toFixed(2) + " NDVI" : (Number(v) / 10).toFixed(0) + " mm");
@@ -8,9 +8,12 @@ export const cond = (cover, thr) =>
       : Number(cover) === 2 ? `the crop health index (NDVI) for your plot is below ${unit(cover, thr)}`
         : `rain on your plot over the last 30 days is below ${unit(cover, thr)}`;
 
+// People's names (off-chain, /api/names), loaded with every snapshot. Unknown addresses show shortened.
+const titleCase = (s) => String(s).toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+let NAMES = {};
+export const setNames = (names) => { NAMES = names || {}; };
 export const nameOf = (addr) => {
-  const d = DEMO_ACCOUNTS.find((a) => a.addr.toLowerCase() === String(addr).toLowerCase());
-  return d ? d.label.replace(/ \(.*\)/, "") : short(addr);
+  return NAMES[String(addr).toLowerCase()] || short(addr);
 };
 
 export const dateTime = (ts) => new Date(Number(ts) * 1000).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
@@ -81,6 +84,8 @@ export function farmerEventText(e) {
   const a = e.args;
   switch (e.name) {
     case "FarmerRegistered": return "You registered with FarmLedger";
+    case "FarmerJoined": return `Your farm is in ${titleCase(fromB32(a.district))} district`;
+    case "FarmerAssigned": return `${nameOf(a.agent)} is your insurance agent`;
     case "PlotRegistered": return `Plot #${a.plotId} (${fromB32(a.crop).toLowerCase()}) added to your farm`;
     case "AnimalRegistered": return `Animal ${fromB32(a.tagId)} added to your farm`;
     case "PolicyPurchased": return `Policy #${a.policyId} started: cover ${fmt(a.sumInsured)} RWF, premium paid ${fmt(a.premium)} RWF`;
