@@ -2,7 +2,8 @@
 import { useEffect, useState } from "react";
 import { ethers } from "ethers";
 import { Badge, Box, DataTable, Dialog, KV, Stat, Timeline } from "../components/ui";
-import { DEMO_ACCOUNTS, b32, fmt, fromB32, hashOf, short } from "../lib/chain";
+import { b32, fmt, fromB32, hashOf, short } from "../lib/chain";
+import { api } from "../lib/remote-signer";
 import { DAY, dateTime, eventText, nameOf, relevantEvents } from "../lib/format";
 
 const vetState = (v) => (v.certified ? ["g", "Certified"] : v.active ? ["a", "Expired"] : ["r", "Revoked"]);
@@ -59,8 +60,9 @@ export function AdminVets({ ctx, snap, run, busy }) {
       <div className="two">
         <Box title="Certify a veterinarian" sub="Records the licence and grants the vet role in one transaction. The licence number is hashed in your browser; only the hash is stored.">
           <label>Wallet address</label>
-          <input value={f.addr} onChange={set("addr")} placeholder="0x…" list="demo-addrs" />
-          <datalist id="demo-addrs">{DEMO_ACCOUNTS.map((a) => <option key={a.key} value={a.addr}>{a.label}</option>)}</datalist>
+          <input value={f.addr} onChange={set("addr")} placeholder="0x…" list="staff-addrs" />
+          <datalist id="staff-addrs">{Object.entries(snap.names || {}).map(([a, n]) => <option key={a} value={ethers.getAddress(a)}>{n}</option>)}</datalist>
+          <p className="muted small">To give a new vet a login as well, add them under Staff logins instead: that certifies them in the same step.</p>
           <div className="row">
             <div><label>Licence number</label><input value={f.lic} onChange={set("lic")} placeholder="RVC-LIC-004" /></div>
             <div><label>Sector served</label><input value={f.sector} onChange={set("sector")} /></div>
@@ -101,22 +103,28 @@ const ROLE_DOC = [
   ["VET", "VET_ROLE", "Signs claim decisions, but only counts while certified (active, unexpired licence record)."],
 ];
 
-export function AdminAccess({ ctx, snap }) {
+export function AdminAccess({ ctx, snap, cfg }) {
   const { ledger } = ctx;
   const [grid, setGrid] = useState(null);
   useEffect(() => {
     (async () => {
       const roles = await Promise.all(ROLE_DOC.map(async ([k, fn]) => [k, fn === "DEFAULT_ADMIN_ROLE" ? ethers.ZeroHash : await ledger[fn]()]));
+      // everyone with a login, plus the role addresses the deployment was set up with (services, government...)
+      const people = new Map();
+      try { for (const s of (await api("/api/staff")).staff) people.set(s.address.toLowerCase(), { label: `${s.name} (${s.username})`, addr: s.address }); } catch { /* list unavailable */ }
+      for (const [role, addr] of Object.entries(cfg.dep.roles || {})) {
+        if (addr && !people.has(addr.toLowerCase())) people.set(addr.toLowerCase(), { label: `Deployment: ${role}`, addr });
+      }
       const rows = [];
-      for (const a of DEMO_ACCOUNTS) {
+      for (const a of people.values()) {
         const has = {};
         for (const [k, h] of roles) has[k] = await ledger.hasRole(h, a.addr);
         has.CERT = (await ledger.isCertifiedVet(a.addr));
-        rows.push({ id: a.key, a, has });
+        rows.push({ id: a.addr, a, has });
       }
       setGrid(rows);
     })().catch(() => setGrid([]));
-  }, [ledger, snap.vets.length, snap.now]);
+  }, [ledger, snap.vets.length, snap.now, cfg]);
   return (
     <>
       <Box title="Roles" sub="Permissions are enforced by the contract itself. Nobody, including the operator, can act outside their role.">
