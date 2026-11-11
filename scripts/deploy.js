@@ -7,9 +7,19 @@
 //            (e.g. a Safe multisig that becomes the only admin), then
 //            npx hardhat run scripts/deploy.js --network arbitrumSepolia
 //   Off the local chain no role falls back to the deployer: one key holding every role is the gap this avoids.
+//   Polygon Amoy: see deploy/amoy.env.example, then  npm run deploy:amoy
+//
+// deployment.json is served to browsers, so its rpcUrl is a PUBLIC endpoint (PUBLIC_RPC_URL or the network's public
+// RPC), never the private one in POLYGON_AMOY_RPC that may carry an API key. Servers use RPC_URL instead.
 const fs = require("fs");
 const path = require("path");
 const hre = require("hardhat");
+
+// Public endpoints and wallet details per network (written to deployment.json for the browser).
+const PUBLIC = {
+  polygonAmoy: { rpcUrl: "https://polygon-amoy-bor-rpc.publicnode.com", chainName: "Polygon Amoy", currency: "POL", explorer: "https://amoy.polygonscan.com" },
+  arbitrumSepolia: { rpcUrl: "https://sepolia-rollup.arbitrum.io/rpc", chainName: "Arbitrum Sepolia", currency: "ETH", explorer: "https://sepolia.arbiscan.io" },
+};
 
 async function main() {
   const { ethers, network, artifacts } = hre;
@@ -34,6 +44,8 @@ async function main() {
   const guardian = role("GUARDIAN_ADDRESS", deployer);
 
   console.log(`Deploying to ${network.name} as ${deployer.address}`);
+  // first block that can hold this deployment's events: the indexer starts here instead of at block 0
+  const deployBlock = await ethers.provider.getBlockNumber();
   // Test money. Local chain: an open faucet for the demo. Elsewhere only the treasury (TREASURY_ADDRESS) may mint.
   const token = await (await ethers.getContractFactory("MockRWF")).deploy(local);
   await token.waitForDeployment();
@@ -106,10 +118,15 @@ async function main() {
   }
 
   const chainId = Number((await ethers.provider.getNetwork()).chainId);
+  const pub = PUBLIC[network.name] || {};
   const info = {
     network: network.name,
     chainId,
-    rpcUrl: network.config.url || "http://127.0.0.1:8545",
+    rpcUrl: process.env.PUBLIC_RPC_URL || (local ? network.config.url || "http://127.0.0.1:8545" : pub.rpcUrl || network.config.url),
+    chainName: pub.chainName || "FarmLedger network",
+    nativeCurrency: { name: pub.currency || "Ether", symbol: pub.currency || "ETH", decimals: 18 },
+    explorer: pub.explorer || null,
+    deployBlock,
     token: await token.getAddress(),
     ledger: await ledger.getAddress(),
     cropClaims: await cropClaims.getAddress(),
