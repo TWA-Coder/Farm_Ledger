@@ -10,3 +10,5 @@ web/.next/
 web/node_modules/
 'Claude outputs'/
 .env.example
+# network overlays and backups of .env hold private keys
+.env.*
