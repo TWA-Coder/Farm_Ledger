@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import claims from "../shared/claims";
 import { fetchStored, sha256Hex } from "../lib/documents";
 import { Badge, Box, DataTable, Dialog, KV, Quorum, Stepper, Timeline } from "../components/ui";
-import { advanceTime, contractsFor, DEMO_ACCOUNTS, fmt, short } from "../lib/chain";
+import { advanceTime, contractsFor, LOCAL_ORACLE_KEY, fmt, short } from "../lib/chain";
 import { DAY, dateTime, eventText, nameOf, sortedEvents } from "../lib/format";
 
 export const CLAIM_BADGE = [["n", "None"], ["a", "Being checked"], ["g", "Approved and paid"], ["r", "Rejected"]];
@@ -101,8 +101,8 @@ export function AuditView({ snap }) {
 
 // Local-chain stand-ins for real-world events.
 export function DemoView({ snap, cfg, provider, run, busy }) {
-  const oracleAcct = DEMO_ACCOUNTS.find((a) => a.role === "oracle");
-  const oracle = useMemo(() => contractsFor(cfg, provider, oracleAcct.pk).ledger, [cfg, provider]); // eslint-disable-line
+  // local chain only (the menu hides Test tools elsewhere): Hardhat's public oracle key posts the test readings
+  const oracle = useMemo(() => contractsFor(cfg, provider, LOCAL_ORACLE_KEY).ledger, [cfg, provider]);
   const [scenario, setScenario] = useState("drought");
   const [plot, setPlot] = useState(1);
   const [days, setDays] = useState(8);
