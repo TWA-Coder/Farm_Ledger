@@ -45,8 +45,15 @@ Then open:
 | Portal (all roles) | http://localhost:3000/app |
 | Phone simulator (USSD) | http://localhost:3000/ussd |
 
-In the portal, choose a demo account at the top: **Aline / Jean** (farmers), **Eric / Claudine** (insurance agents),
-**Underwriter**, the **vets**, **Admin**. A guided tour is in [docs/DEMO.md](docs/DEMO.md).
+The portal opens on a sign-in page. On the local demo it lists the seeded people with one-click **Sign in** buttons:
+
+| Who | Signs in with |
+|---|---|
+| Admin, underwriter, vets (`vet1`-`vet3`), agents Eric and Claudine | username (`admin`, `underwriter`, `vet1`, `eric`, ...) + password `farmledger` |
+| Farmers Aline and Jean | phone `0788000001` PIN `1357`, phone `0788000002` PIN `2468` (the same PIN works on USSD) |
+
+New farmers register on the same page (name, National ID, phone, district, then an SMS code and a PIN). New staff are
+added by the admin (*Staff logins*) and agents by their underwriter (*Agents*). A guided tour is in [docs/DEMO.md](docs/DEMO.md).
 
 <details>
 <summary>Run the parts by hand (any system, one terminal each)</summary>
@@ -64,8 +71,7 @@ npm run web                            # 5. portal on http://localhost:3000
 ## Browsers
 
 * The portal and the phone simulator work in any current browser. Use them **on the computer that runs the demo**: they talk to `localhost`, so a phone or another computer cannot open them.
-* **Farmer accounts** created in the browser keep their key in that browser. A different browser, profile or private window means a different (new) account, and clearing site data loses it. The demo accounts (Aline, Eric, ...) work everywhere.
-* **Connect wallet** (vets, underwriters and admins with their own key) needs the MetaMask extension: Chrome, Edge, Brave or Firefox. Safari has no MetaMask extension; use the demo accounts there.
+* Everyone signs in with a password or a PIN; no wallet extension is needed, and the same sign-in works in any browser.
 * After restarting the chain, reload the page (the portal says so if the contracts are gone).
 
 ## Tests
