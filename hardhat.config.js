@@ -1,5 +1,8 @@
 require("@nomicfoundation/hardhat-toolbox");
-require("dotenv").config();
+// .env plus the overlay for the network being used, e.g. .env.polygonAmoy (services/env.js)
+const { loadEnv, hardhatNetwork } = require("./services/env");
+loadEnv(hardhatNetwork());
+const { alchemyUrl } = require("./services/rpc");
 
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const accounts = PRIVATE_KEY ? [PRIVATE_KEY] : [];
@@ -16,12 +19,12 @@ module.exports = {
     // Public testnets (proposal 1.5): set the variables in .env, then
     //   npx hardhat run scripts/deploy.js --network arbitrumSepolia
     arbitrumSepolia: {
-      url: process.env.ARBITRUM_SEPOLIA_RPC || "https://sepolia-rollup.arbitrum.io/rpc",
+      url: process.env.ARBITRUM_SEPOLIA_RPC || alchemyUrl("arbitrumSepolia") || "https://sepolia-rollup.arbitrum.io/rpc",
       chainId: 421614,
       accounts,
     },
     polygonAmoy: {
-      url: process.env.POLYGON_AMOY_RPC || "https://rpc-amoy.polygon.technology",
+      url: process.env.POLYGON_AMOY_RPC || alchemyUrl("polygonAmoy") || "https://polygon-amoy-bor-rpc.publicnode.com",
       chainId: 80002,
       accounts,
     },
