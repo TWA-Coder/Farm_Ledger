@@ -11,12 +11,43 @@
 // Other contracts of the deployment (CropClaims) are indexed into the same table; their event names do not overlap
 // with FarmLedger's.
 //
+// Scanning through a second endpoint (INDEXER_RPC_URL, optional): Alchemy's free plan answers eth_getLogs for at most
+// 10 blocks, which on Amoy (a block every ~2 s) means thousands of requests a day. With INDEXER_RPC_URL set, a node
+// that accepts wide ranges (e.g. a public one) only FINDS the blocks that hold our events; the events of each such
+// block are then read from the main provider (RPC_URL) by block hash. So the scanner can make the index slower or
+// incomplete if it misbehaves, but it cannot put an event in the index (and an SMS on someone's phone) that the main
+// provider does not confirm.
+//
 // Callers: the portal's /api/events route (synchronises on each request, so screens are never behind) and, later,
 // the notifier. Several processes may run sync() at once: inserts are idempotent (block, log_index).
 const { encodeArgs, reviveArgs } = require("../shared/event-json");
 const dbm = require("./db");
 
 const CHUNK = Number(process.env.INDEXER_CHUNK_BLOCKS || 2000);
+let scanner; // undefined = not created yet, null = not configured
+
+function scanProvider() {
+  if (scanner === undefined) {
+    const url = process.env.INDEXER_RPC_URL;
+    if (url) {
+      const { ethers } = require("ethers");
+      scanner = new ethers.JsonRpcProvider(url, undefined, { cacheTimeout: -1 });
+    } else scanner = null;
+  }
+  return scanner;
+}
+
+// Logs of `addresses` in [from, to]. With a scanner: blocks found by the scanner, events read from `provider`.
+async function readLogs(provider, scan, addresses, from, to) {
+  if (!scan) return provider.getLogs({ address: addresses, fromBlock: from, toBlock: to });
+  const blocks = [...new Set((await scan.getLogs({ address: addresses, fromBlock: from, toBlock: to })).map((l) => l.blockNumber))];
+  const logs = [];
+  for (const n of blocks.sort((a, b) => a - b)) {
+    const block = await provider.getBlock(n);
+    if (block) logs.push(...(await provider.getLogs({ address: addresses, blockHash: block.hash })));
+  }
+  return logs;
+}
 const CONFIRMATIONS = Number(process.env.INDEXER_CONFIRMATIONS || 0); // set e.g. 3 on a public network
 
 function reset(db, identity) {
@@ -35,18 +66,22 @@ function reset(db, identity) {
 
 const running = new Map(); // one sync at a time per database in this process
 
-async function sync({ db = dbm.get(), provider, ledger, others = [] }) {
+// startBlock: the block the contracts were deployed in (deployment.json "deployBlock"). Nothing before it can hold
+// their events, and on a public chain scanning from block 0 would take thousands of requests.
+async function sync({ db = dbm.get(), provider, ledger, others = [], startBlock = 0 }) {
   if (running.has(db)) return running.get(db);
-  const p = doSync(db, provider, [ledger, ...others]).finally(() => running.delete(db));
+  const p = doSync(db, provider, [ledger, ...others], Number(startBlock) || 0).finally(() => running.delete(db));
   running.set(db, p);
   return p;
 }
 
-async function doSync(db, provider, contracts) {
+async function doSync(db, provider, contracts, startBlock) {
   const byAddress = new Map();
   for (const c of contracts) byAddress.set((await c.getAddress()).toLowerCase(), c);
   const addresses = [...byAddress.keys()];
   const { chainId } = await provider.getNetwork();
+  const scan = scanProvider();
+  if (scan && (await scan.getNetwork()).chainId !== chainId) throw new Error("INDEXER_RPC_URL is on a different chain than RPC_URL");
   const identity = `${chainId}:${addresses.join(",")}`; // adding a contract rebuilds the index so its history is read
   if (dbm.getMeta(db, "indexer_identity") !== identity) reset(db, identity);
 
@@ -60,9 +95,9 @@ async function doSync(db, provider, contracts) {
   const target = head - CONFIRMATIONS;
   const insert = db.prepare("INSERT OR IGNORE INTO events (block, log_index, tx, name, args) VALUES (?, ?, ?, ?, ?)");
   let added = 0;
-  for (let from = cursor + 1; from <= target; from += CHUNK) {
+  for (let from = Math.max(cursor + 1, startBlock); from <= target; from += CHUNK) {
     const to = Math.min(from + CHUNK - 1, target);
-    const logs = await provider.getLogs({ address: addresses, fromBlock: from, toBlock: to });
+    const logs = await readLogs(provider, scan, addresses, from, to);
     const toHash = (await provider.getBlock(to)).hash;
     dbm.tx(db, () => {
       for (const l of logs) {
@@ -92,4 +127,4 @@ function events(db = dbm.get(), { name = null, raw = false, after = null } = {})
   });
 }
 
-module.exports = { sync, events };
+module.exports = { sync, events, readLogs };
