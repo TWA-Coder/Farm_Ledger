@@ -4,7 +4,7 @@
 //
 // `transport(op, entryPoint)` delivers a signed operation and returns its receipt. Default: the bundler's JSON-RPC
 // (eth_sendUserOperation + eth_getUserOperationReceipt). Tests pass one that calls handleOps directly.
-// CommonJS so the Hardhat tests and the Node services can require it; the portal imports it through lib/smart-account.js.
+// CommonJS so the Hardhat tests and the Node services (phone accounts, custody) can require it.
 const { ethers } = require("ethers");
 const uo = require("./userop");
 
