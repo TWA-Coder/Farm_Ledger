@@ -275,9 +275,9 @@ describe("Notifications (SMS outbox + notifier)", function () {
 
   describe("USSD HTTP front", function () {
     const ussd = { handle: async ({ phoneNumber }) => `CON hello ${phoneNumber}` };
-    async function call(handler, { url = "/ussd", headers = {}, body = "sessionId=s&phoneNumber=%2B250788000001&text=" } = {}) {
+    async function call(handler, { method = "POST", url = "/ussd", headers = {}, body = "sessionId=s&phoneNumber=%2B250788000001&text=" } = {}) {
       const req = Readable.from([Buffer.from(body)]);
-      Object.assign(req, { method: "POST", url, headers: { "content-type": "application/x-www-form-urlencoded", ...headers } });
+      Object.assign(req, { method, url, headers: { "content-type": "application/x-www-form-urlencoded", ...headers } });
       const res = { code: 0, body: "", writeHead(c) { this.code = c; }, end(b = "") { this.body = String(b); } };
       await handler(req, res);
       return res;
@@ -297,6 +297,24 @@ describe("Notifications (SMS outbox + notifier)", function () {
       expect((await call(h, { headers: tunnel })).code).to.equal(403);
       expect((await call(h, { headers: tunnel, url: "/ussd?key=wrong-token" })).code).to.equal(403);
       expect(await call(h, { headers: tunnel, url: "/ussd?key=s3cret-token" })).to.deep.include({ code: 200, body: "CON hello +250788000001" });
+    });
+
+    it("also takes the key as the last path segment (/ussd/<key>), for callback fields that refuse query strings", async () => {
+      const tunnel = { "x-forwarded-for": "203.0.113.5" };
+      const h = createHandler({ ussd, outbox: createOutbox({ db, logFile: null, quiet: true }), token: "s3cret-token", log: quiet });
+      expect(await call(h, { headers: tunnel, url: "/ussd/s3cret-token" })).to.deep.include({ code: 200, body: "CON hello +250788000001" });
+      expect((await call(h, { headers: tunnel, url: "/ussd/wrong-token" })).code).to.equal(403);
+      expect((await call(h, { headers: tunnel, url: "/ussd/" })).code).to.equal(404); // no key, no route
+      expect((await call(h, { url: "/ussd/anything" })).code).to.equal(200); // local simulator: no key needed
+    });
+
+    it("answers GET on the callback paths with 200 and a description (gateways may check the URL), never a menu", async () => {
+      const h = createHandler({ ussd, outbox: createOutbox({ db, logFile: null, quiet: true }), token: "s3cret-token", log: quiet });
+      for (const url of ["/ussd", "/ussd/", "/ussd/s3cret-token", "/ussd/wrong", "/sms/delivery"]) {
+        const r = await call(h, { method: "GET", url, headers: { "x-forwarded-for": "203.0.113.5" } });
+        expect(r.code, url).to.equal(200);
+        expect(r.body, url).to.include("callback endpoint");
+      }
     });
 
     it("takes delivery reports on /sms/delivery", async () => {
