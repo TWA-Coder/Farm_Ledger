@@ -6,12 +6,12 @@ export const metadata = {
 };
 
 const JOURNEY = [
-  ["Register", "Your National ID and phone number. Nothing else."],
-  ["Add your farm", "A plot with its district and crop, or a cow with its ear tag number."],
-  ["Choose cover and pay", "Pick the level of rain or crop health that triggers a payout, and the dates your cover starts and ends. You see the full price before you pay, and fees are covered for you."],
-  ["We watch the risk", null, "Weather and satellite readings for your plot are checked during the season.", "If the cow dies, you report it with a photo, on the website or from a basic phone."],
-  ["The rule is checked", null, "The reading is compared with the rule written in your policy. No inspector has to visit.", "Certified veterinarians review the claim. Enough of them must confirm it."],
-  ["You are paid", "The amount insured is paid to your account and you get an SMS. You can follow every step online or by phone."],
+  ["Register", "With your National ID and phone number, on the website or by dialling the USSD code from a basic phone. You choose a 4-digit PIN, and you can use the menus in English or Kinyarwanda."],
+  ["Meet your agent", "An insurance agent working in your district is assigned to you. Together you add your plot (district and crop) or your cow (ear tag number), and the agent sends your application to the insurer."],
+  ["Review the contract and pay", "The insurer writes the contract and you get an SMS. You read the cover, dates and price, then pay within 14 days with MTN Mobile Money from your phone, or on the website. The government pays 40% of the premium, and transaction fees are covered for you."],
+  ["We watch the risk", null, "Weather and satellite readings for your plot are checked during the season. You can also report a crop loss.", "If the cow dies, you report it on the website or from a basic phone."],
+  ["The rule is checked", null, "A reading that meets the rule in your policy pays with no inspector visit. A reported crop loss is reviewed by two people at the insurer.", "Certified veterinarians review the claim. Enough of them must confirm it."],
+  ["You are paid", "The amount insured is sent to your Mobile Money number (or your wallet on the website) and you get an SMS. You can follow every step online or by phone."],
 ];
 
 const COVERS = [
@@ -43,9 +43,10 @@ export default function Landing() {
               <p className="lp-kicker">Crop and cattle insurance for Rwandan farmers</p>
               <h1>Protect your harvest and your cattle, with rules you can read before you pay.</h1>
               <p className="lp-lead">
-                If the rains fail on your plot, your crop cover pays automatically from weather readings.
-                If an insured cow dies, certified veterinarians confirm it and you are paid. You can see where
-                your policy or claim stands at any time, on a smartphone or a basic phone.
+                An insurance agent in your district helps you apply, and you pay with Mobile Money. If the rains fail on
+                your plot, your crop cover pays automatically from weather readings. If an insured cow dies, certified
+                veterinarians confirm it and you are paid. You can see where your policy or claim stands at any time,
+                on a smartphone or a basic phone.
               </p>
               <div className="lp-ctas">
                 <a className="lp-btn" href="/app">Get started</a>
@@ -117,7 +118,8 @@ export default function Landing() {
               <li><b>The rule is written down before you pay.</b> Each policy states exactly when it pays. Nobody can change it afterwards.</li>
               <li><b>The money is set aside.</b> When you buy cover, the insurer's funds for your full payout are reserved and cannot be used for anything else.</li>
               <li><b>No waiting for an inspector on crop cover.</b> When a reading meets the rule, the payout happens in the same step.</li>
-              <li><b>Works on a basic phone.</b> Check your policies, report a cow's death and follow a claim by USSD.</li>
+              <li><b>Works on a basic phone.</b> Register, accept and pay a contract, report a loss and follow a claim by USSD, in English or Kinyarwanda.</li>
+              <li><b>The government shares the cost.</b> 40% of the premium is paid from a government subsidy pool, up to a limit per farmer.</li>
               <li><b>Every step is on record.</b> Purchases, readings, vet decisions and payouts are kept in a record that anyone can check.</li>
             </ul>
           </div>
@@ -142,10 +144,13 @@ export default function Landing() {
               </figure>
               <h3>Where FarmLedger stands today</h3>
               <ul className="lp-plain">
-                <li>FarmLedger is not yet offered through a licensed insurer, so premiums and payouts in the portal use demonstration funds.</li>
+                <li>This is a test version. FarmLedger is not yet offered through a licensed insurer, so premiums and payouts use a test currency (mRWF) with no real value.</li>
+                <li>The public demo runs on Polygon Amoy, a public test blockchain: every policy, reading, claim decision and payout is a real transaction that anyone can look up.</li>
+                <li>Farmers on a basic phone do not need a wallet. Their account key is kept encrypted by the FarmLedger server and used only after their PIN.</li>
                 <li>Weather readings are simulated unless the oracle is switched to real NASA POWER rainfall. The portal labels every reading as real or sample data. Crop health (NDVI) readings are always samples for now.</li>
-                <li>SMS and Mobile Money payments are simulated. Real SMS can be switched on with an Africa's Talking account.</li>
-                <li>Some terms of the standard NAIS contracts are not included yet, such as the 40% government share of the premium and the excess.</li>
+                <li>Mobile Money payments are simulated (the MTN MoMo sandbox can be switched on). SMS are sent from a test phone through an SMS gateway.</li>
+                <li>USSD runs in the Africa's Talking test environment: a live USSD code in Rwanda needs approval from the regulator (RURA) and monthly fees. The basic phone menu below shows the same screens.</li>
+                <li>Some terms of the standard NAIS contracts are not included yet, such as the excess.</li>
               </ul>
               <div className="lp-ctas">
                 <a className="lp-btn" href="/app">Open the portal</a>

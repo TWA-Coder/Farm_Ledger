@@ -9,7 +9,8 @@ const PHONES = [
 ];
 
 export default function UssdChannel() {
-  const [service, setService] = useState("http://localhost:4000");
+  // "" = through the portal (/api/ussd-sim), which works locally and on a hosted portal; or a USSD service address
+  const [service, setService] = useState("");
   const [phone, setPhone] = useState(PHONES[0].n);
   const [inputs, setInputs] = useState([]);
   const [screen, setScreen] = useState("");
@@ -22,7 +23,7 @@ export default function UssdChannel() {
   async function send(nextInputs) {
     setBusy(true);
     try {
-      const res = await fetch(service.replace(/\/$/, "") + "/ussd", {
+      const res = await fetch(service.trim() ? service.trim().replace(/\/$/, "") + "/ussd" : "/api/ussd-sim", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ sessionId: sid.current, serviceCode: "*384*55#", phoneNumber: "+" + phone, text: nextInputs.join("*") }),
@@ -34,7 +35,7 @@ export default function UssdChannel() {
       setLive(!end);
       setLog((l) => [...l, { me: nextInputs.length ? nextInputs[nextInputs.length - 1] : "*384*55#", reply: body, end }]);
     } catch {
-      setScreen("Cannot reach the USSD service.\nStart it with:  npm run ussd");
+      setScreen("Cannot reach the USSD service.\nStart it with:  npm run phone");
       setLive(false);
     }
     setBusy(false);
@@ -61,7 +62,7 @@ export default function UssdChannel() {
       </header>
       <main className="content">
         <div className="callout">
-          The USSD channel is for <b>checking policies, registering a claim and following its progress</b>. Policies are applied for, paid for and issued on the web portal only.
+          From a basic phone a farmer can <b>register, review and pay a contract with Mobile Money, report a loss and follow a claim</b>. The insurance agent submits the application; the farmer accepts and pays it here or on the portal.
         </div>
         <div className="two">
           <Box title="Handset simulator" sub="Behaves like a basic phone without internet. Dial, then answer with numbers.">
@@ -80,8 +81,8 @@ export default function UssdChannel() {
               <input aria-label="Your answer" value={value} onChange={(e) => setValue(e.target.value)} placeholder={live ? "Type your answer" : "Dial first"} disabled={!live || busy} autoComplete="off" />
               <button className="btn" disabled={!live || busy || value.trim() === ""}>Send</button>
             </form>
-            <label htmlFor="svc">Service address</label>
-            <input id="svc" value={service} onChange={(e) => setService(e.target.value)} />
+            <label htmlFor="svc">Service address (optional)</label>
+            <input id="svc" value={service} onChange={(e) => setService(e.target.value)} placeholder="through this portal" />
           </Box>
 
           <Box title="Available options">
@@ -89,11 +90,15 @@ export default function UssdChannel() {
               <thead><tr><th>Option</th><th>What it does</th></tr></thead>
               <tbody>
                 <tr><td><b>1</b> My policies</td><td>Lists your policies, then shows cover, premium, dates and status for the one you choose.</td></tr>
-                <tr><td><b>2</b> Report a claim</td><td>Registers a cattle death claim on an active policy. Needs your PIN. Crop cover pays automatically and needs no claim.</td></tr>
+                <tr><td><b>2</b> Report a claim</td><td>Reports a cow's death (reviewed by veterinarians) or a crop loss (reviewed by the insurer) on an active policy. Needs your PIN.</td></tr>
                 <tr><td><b>3</b> Claim status</td><td>Shows whether a claim is awaiting veterinarians, approved and paid, or rejected.</td></tr>
+                <tr><td><b>4</b> Reset PIN</td><td>Sets a new PIN after a one-time code sent by SMS.</td></tr>
+                <tr><td><b>6</b> My offers</td><td>Contracts the insurer drafted for you: read the terms, then pay with Mobile Money or decline.</td></tr>
+                <tr><td><b>7</b> My agent</td><td>The name and phone number of your insurance agent.</td></tr>
+                <tr><td><b>0</b> Ikinyarwanda</td><td>Switches the menus between English and Kinyarwanda.</td></tr>
               </tbody>
             </table>
-            <p className="muted" style={{ marginTop: 10 }}>First call: you will be asked to choose a 4-digit PIN. A number that is not registered on the portal receives an instruction to register there.</p>
+            <p className="muted" style={{ marginTop: 10 }}>A number that is not registered gets <b>1. Register</b>: name, National ID, district and PIN, confirmed by a one-time SMS code. On the public demo the simulator only dials the demo numbers.</p>
             <h2 style={{ marginTop: 16 }}>Conversation</h2>
             <div className="feed" style={{ maxHeight: 260 }}>
               {log.map((l, i) => (

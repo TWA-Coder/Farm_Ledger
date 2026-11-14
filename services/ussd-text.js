@@ -15,7 +15,7 @@ const en = {
   welcome: "Welcome to FarmLedger\n1. Register\n2. I changed my number",
   menuHead: "FarmLedger",
   menu: { policies: "My policies", claim: "Report a claim", status: "Claim status", resetPin: "Reset PIN", cancelMove: "Cancel number change", offers: "My offers", agent: "My agent" },
-  notRegistered: "This number is not registered. Register and buy cover on the FarmLedger website or at an agent. USSD is for checking cover and claims.",
+  notRegistered: "This number is not registered. Register on the FarmLedger website or with an insurance agent, who then applies for cover for you.",
 
   // common
   invalid: "Invalid choice.",
@@ -45,7 +45,7 @@ const en = {
   status: ["Active", "Claim pending", "Paid out", "Expired"],
 
   // 1. My policies
-  noPolicies: "You have no policies yet. Buy cover on the FarmLedger website or at an agent.",
+  noPolicies: "You have no policies yet. Your agent applies for cover for you; you get an SMS, then review and pay the contract in My offers.",
   yourPolicies: "Your policies:",
   policyHead: (id, cover) => `Policy #${id} ${cover}`,
   coverAmount: (n) => `Cover ${n} RWF`,
@@ -164,7 +164,7 @@ const rw = {
   welcome: "Murakaza neza kuri FarmLedger\n1. Kwiyandikisha\n2. Nahinduye nimero",
   menuHead: "FarmLedger",
   menu: { policies: "Ubwishingizi bwanjye", claim: "Saba indishyi", status: "Ubusabe bwanjye", resetPin: "Hindura PIN", cancelMove: "Reka guhindura nimero", offers: "Amasezerano", agent: "Umuhuza wanjye" },
-  notRegistered: "Iyi nimero ntiyanditse. Iyandikishe ugure ubwishingizi ku rubuga rwa FarmLedger cyangwa ku muhuza. USSD ni iyo kureba ubwishingizi n'ubusabe.",
+  notRegistered: "Iyi nimero ntiyanditse. Iyandikishe ku rubuga rwa FarmLedger cyangwa ku muhuza, uzagusabira ubwishingizi.",
 
   invalid: "Ihitamo ritemewe.",
   cancelled: "Byahagaritswe.",
@@ -190,7 +190,7 @@ const rw = {
   coverShort: ["Amapfa", "Imyuzure", "Ibihingwa", "Amatungo"],
   status: ["Burakora", "Bufite ubusabe", "Bwishyuwe", "Bwarangiye"],
 
-  noPolicies: "Nta bwishingizi ufite. Bugure ku rubuga rwa FarmLedger cyangwa ku muhuza.",
+  noPolicies: "Nta bwishingizi ufite. Umuhuza wawe agusabira ubwishingizi; uzabona SMS, hanyuma usuzume kandi wishyure amasezerano muri Amasezerano.",
   yourPolicies: "Ubwishingizi bwawe:",
   policyHead: (id, cover) => `#${id} ${cover}`,
   coverAmount: (n) => `Bwishingira ${n} RWF`,
