@@ -9,7 +9,7 @@ and the RPC endpoint change.
 | Item | Where | Notes |
 |---|---|---|
 | A private RPC endpoint | Free [Alchemy](https://dashboard.alchemy.com) API key with Polygon Amoy enabled (`ALCHEMY_API_KEY`), or any full URL in `POLYGON_AMOY_RPC` + `RPC_URL` | The public RPC rate-limits heavily |
-| Test POL, about 1.5 POL in total | [Polygon faucet](https://faucet.polygon.technology), Alchemy / QuickNode Amoy faucets | Faucets give small daily amounts: collect over a few days if needed |
+| Test POL, about 1.8 POL in total | [Polygon faucet](https://faucet.polygon.technology), Alchemy / QuickNode Amoy faucets | Faucets give small daily amounts: collect over a few days if needed |
 | A Polygonscan API key (optional) | [polygonscan.com](https://polygonscan.com/myapikey) | Only to publish the verified source code |
 
 ## 1. Keys and settings
@@ -24,10 +24,14 @@ keys, and losing it locks those accounts.
 
 ## 2. Fund the deployer
 
-Only the deployer (`PRIVATE_KEY`, the first address `new-keys.js` printed) needs test POL: **1 POL**. Measured at
-Amoy's 30 gwei, the deployment costs ~0.23 POL in gas plus 0.1 POL for the paymaster deposit, and the seed script
-then sends ~0.52 POL on to every other key that sends transactions (underwriter, government, treasury, demo people,
-bundler, oracle, USSD agent). About 0.25 POL is left over.
+Only the deployer (`PRIVATE_KEY`, the first address `new-keys.js` printed) needs test POL: **about 1.8 POL**. On
+2026-11-17 (Amoy at ~36 gwei) the deployment plus a 0.1 POL paymaster deposit cost ~0.55 POL; with the 0.5 POL deposit
+now in `deploy/amoy.env.example` (0.1 POL lets only a few farmer operations through) that is ~0.95 POL, and the seed script then sends ~0.48 POL on to every other key that sends
+transactions (underwriter, government, treasury, demo people, bundler, oracle, USSD agent) and spends a little itself.
+With 1 POL the seed runs out of gas during the top-ups; topping up the deployer and re-running `npm run seed:amoy`
+is safe at that point (the top-ups fill each key up to its target, and nothing else has run yet). If it stops later,
+while creating the farmers, run `SEED_RESUME=farmers npm run seed:amoy` instead: it skips the pool, products, subsidy,
+reviewers and agents that are already on chain.
 
 Faucets give small amounts and most require the receiving wallet to hold a little real ETH on Ethereum mainnet:
 
