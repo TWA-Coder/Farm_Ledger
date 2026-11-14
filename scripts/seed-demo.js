@@ -76,7 +76,9 @@ async function people() {
     // the same indexes as scripts/deploy.js grants roles to
     return { admin: w(0), minter: w(0), underwriter: w(1), vets: [w(3), w(7), w(8)], government: w(12), reviewer: w(11), eric: w(15), claudine: w(16) };
   }
-  const [admin] = await ethers.getSigners();
+  // a Wallet, not ethers.getSigners()[0]: the admin's staff login is created from admin.privateKey, which Hardhat's
+  // signer does not expose (the login then got a fresh key with no role on the ledger)
+  const admin = envWallet("PRIVATE_KEY");
   const p = { admin, underwriter: envWallet("UNDERWRITER_PRIVATE_KEY"), vets: [envWallet("VET_PRIVATE_KEY")], government: envWallet("GOVERNMENT_PRIVATE_KEY"),
     minter: envWallet("TREASURY_PRIVATE_KEY"), ...demoWallets(["eric", "claudine", "reviewer"]) };
   const services = Object.fromEntries(["BUNDLER_PRIVATE_KEY", "ORACLE_PRIVATE_KEY", "AGENT_PRIVATE_KEY"]
@@ -119,53 +121,59 @@ async function main() {
   const ledgerAddr = info.ledger;
   const db = dbm.get();
 
-  // the insurer's pool
-  await (await token.mint(underwriter.address, 20_000_000)).wait();
-  await (await token.connect(underwriter).approve(ledgerAddr, ethers.MaxUint256)).wait();
-  await (await ledger.connect(underwriter).depositLiquidity(10_000_000)).wait();
+  // SEED_RESUME=farmers: a seed that already did the steps below and then stopped while creating the farmers (e.g. out
+  // of gas on a public network) carries on from the farmers, instead of minting and creating the products again.
+  const resume = process.env.SEED_RESUME === "farmers";
+  if (resume) console.log("SEED_RESUME=farmers: pool, products, subsidy, reviewers and agents are already set up; starting at the farmers.");
+  if (!resume) {
+    // the insurer's pool
+    await (await token.mint(underwriter.address, 20_000_000)).wait();
+    await (await token.connect(underwriter).approve(ledgerAddr, ethers.MaxUint256)).wait();
+    await (await ledger.connect(underwriter).depositLiquidity(10_000_000)).wait();
 
-  // products (rainfall = 0.1 mm over trailing 30 days, NDVI x 10000)
-  await (await ledger.connect(underwriter).createProduct(0, 1500, 1000, 120)).wait(); // 1 Drought  < 150 mm
-  await (await ledger.connect(underwriter).createProduct(1, 3500, 800, 120)).wait();  // 2 Flood    > 350 mm
-  await (await ledger.connect(underwriter).createProduct(2, 3000, 800, 120)).wait();  // 3 Low NDVI < 0.30
-  await (await ledger.connect(underwriter).createProduct(3, 0, 500, 365)).wait();     // 4 Livestock mortality
-  // extra trigger levels the farmer can choose (level 0 is the one above)
-  await (await ledger.connect(underwriter).addTriggerLevel(1, 1200, 700)).wait();  // drought, stricter: < 120 mm at 7%
-  await (await ledger.connect(underwriter).addTriggerLevel(1, 1800, 1400)).wait(); // drought, wider:    < 180 mm at 14%
-  await (await ledger.connect(underwriter).addTriggerLevel(2, 4000, 500)).wait();  // flood, stricter:   > 400 mm at 5%
-  await (await ledger.connect(underwriter).addTriggerLevel(2, 3000, 1200)).wait(); // flood, wider:      > 300 mm at 12%
-  await (await ledger.connect(underwriter).addTriggerLevel(3, 4000, 1200)).wait(); // crop health, wider: NDVI < 0.40 at 12%
+    // products (rainfall = 0.1 mm over trailing 30 days, NDVI x 10000)
+    await (await ledger.connect(underwriter).createProduct(0, 1500, 1000, 120)).wait(); // 1 Drought  < 150 mm
+    await (await ledger.connect(underwriter).createProduct(1, 3500, 800, 120)).wait();  // 2 Flood    > 350 mm
+    await (await ledger.connect(underwriter).createProduct(2, 3000, 800, 120)).wait();  // 3 Low NDVI < 0.30
+    await (await ledger.connect(underwriter).createProduct(3, 0, 500, 365)).wait();     // 4 Livestock mortality
+    // extra trigger levels the farmer can choose (level 0 is the one above)
+    await (await ledger.connect(underwriter).addTriggerLevel(1, 1200, 700)).wait();  // drought, stricter: < 120 mm at 7%
+    await (await ledger.connect(underwriter).addTriggerLevel(1, 1800, 1400)).wait(); // drought, wider:    < 180 mm at 14%
+    await (await ledger.connect(underwriter).addTriggerLevel(2, 4000, 500)).wait();  // flood, stricter:   > 400 mm at 5%
+    await (await ledger.connect(underwriter).addTriggerLevel(2, 3000, 1200)).wait(); // flood, wider:      > 300 mm at 12%
+    await (await ledger.connect(underwriter).addTriggerLevel(3, 4000, 1200)).wait(); // crop health, wider: NDVI < 0.40 at 12%
 
-  // Government premium subsidy (Rwanda NAIS pays 40% of the premium), all four products, at most 200,000 per farmer.
-  await (await token.mint(government.address, 5_000_000)).wait();
-  await (await token.connect(government).approve(ledgerAddr, ethers.MaxUint256)).wait();
-  await (await ledger.connect(government).fundSubsidy(5_000_000)).wait();
-  await (await ledger.connect(government).setSubsidy(4000, 200_000)).wait();
-  for (const id of [1, 2, 3, 4]) await (await ledger.connect(government).setSubsidyEligible(id, true)).wait();
+    // Government premium subsidy (Rwanda NAIS pays 40% of the premium), all four products, at most 200,000 per farmer.
+    await (await token.mint(government.address, 5_000_000)).wait();
+    await (await token.connect(government).approve(ledgerAddr, ethers.MaxUint256)).wait();
+    await (await ledger.connect(government).fundSubsidy(5_000_000)).wait();
+    await (await ledger.connect(government).setSubsidy(4000, 200_000)).wait();
+    for (const id of [1, 2, 3, 4]) await (await ledger.connect(government).setSubsidyEligible(id, true)).wait();
 
-  // Crop loss claims: decided by 2 of {underwriter, claims officer}.
-  if (info.cropClaims) {
-    const claims = await ethers.getContractAt("CropClaims", info.cropClaims);
-    await (await claims.connect(underwriter).setReviewer(reviewer.address, true)).wait();
-    await (await claims.connect(underwriter).setReviewQuorum(2)).wait();
+    // Crop loss claims: decided by 2 of {underwriter, claims officer}.
+    if (info.cropClaims) {
+      const claims = await ethers.getContractAt("CropClaims", info.cropClaims);
+      await (await claims.connect(underwriter).setReviewer(reviewer.address, true)).wait();
+      await (await claims.connect(underwriter).setReviewQuorum(2)).wait();
+    }
+
+    // Insurance agents appointed by the underwriter, by district - before the farmers register, because registering
+    // joins the farm's district and that assigns the farmer's agent. Farmers do not book cover: their agent submits the
+    // application, the underwriter drafts the contract, the farmer accepts and pays (PolicyDesk).
+    if (info.policyDesk) {
+      const desk = await ethers.getContractAt("PolicyDesk", info.policyDesk);
+      const D = (...names) => names.map((n) => b32(n.toUpperCase()));
+      await (await desk.connect(underwriter).appointAgent(eric.address, D("Bugesera", "Kayonza", "Rwamagana"))).wait();
+      await (await desk.connect(underwriter).appointAgent(claudine.address, D("Nyagatare", "Huye", "Musanze"))).wait();
+      await contacts.put(eric.address, "250788000015", db);     // agents get SMS too (demo numbers: never texted live)
+      await contacts.put(claudine.address, "250788000016", db);
+    }
+
+    // For the demo the livestock waiting period is shortened to 0 (production default: 7 days). Needs the admin role,
+    // which the deployer no longer has once governance was handed to a multisig (GOVERNANCE_ADDRESS).
+    if (await ledger.hasRole(await ledger.DEFAULT_ADMIN_ROLE(), admin.address)) await (await ledger.setWaitingPeriod(0)).wait();
+    else console.log("Deployer is not admin: livestock waiting period left at the default (set it from the governance multisig).");
   }
-
-  // Insurance agents appointed by the underwriter, by district - before the farmers register, because registering
-  // joins the farm's district and that assigns the farmer's agent. Farmers do not book cover: their agent submits the
-  // application, the underwriter drafts the contract, the farmer accepts and pays (PolicyDesk).
-  if (info.policyDesk) {
-    const desk = await ethers.getContractAt("PolicyDesk", info.policyDesk);
-    const D = (...names) => names.map((n) => b32(n.toUpperCase()));
-    await (await desk.connect(underwriter).appointAgent(eric.address, D("Bugesera", "Kayonza", "Rwamagana"))).wait();
-    await (await desk.connect(underwriter).appointAgent(claudine.address, D("Nyagatare", "Huye", "Musanze"))).wait();
-    await contacts.put(eric.address, "250788000015", db);     // agents get SMS too (demo numbers: never texted live)
-    await contacts.put(claudine.address, "250788000016", db);
-  }
-
-  // For the demo the livestock waiting period is shortened to 0 (production default: 7 days). Needs the admin role,
-  // which the deployer no longer has once governance was handed to a multisig (GOVERNANCE_ADDRESS).
-  if (await ledger.hasRole(await ledger.DEFAULT_ADMIN_ROLE(), admin.address)) await (await ledger.setWaitingPeriod(0)).wait();
-  else console.log("Deployer is not admin: livestock waiting period left at the default (set it from the governance multisig).");
 
   // ---------------------------------------------------------------- farmers: phone accounts (phone + PIN)
   const accounts = phoneAccounts(info, admin);
