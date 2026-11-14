@@ -40,6 +40,7 @@ const { ethers } = require("ethers");
 const { TEXT } = require("./ussd-text");
 const { SMS } = require("./sms-text");
 const lang = require("./lang");
+const { queryEvents } = require("./event-query");
 
 const hashOf = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
 const fromB32 = (x) => { try { return ethers.decodeBytes32String(x); } catch { return x; } };
@@ -51,7 +52,7 @@ const END = (m) => "END " + m;
 const WRITE_SURFACE = ["fileClaimFor"]; // the ONLY state-changing call this service can make
 
 function createUssd(opts) {
-  const { provider, abi, ledgerAddress, cropClaimsAddress = null, deskAddress = null, agent, accounts = null, payments = null, db = require("../web/server/db").get() } = opts;
+  const { provider, abi, ledgerAddress, cropClaimsAddress = null, deskAddress = null, fromBlock = 0, agent, accounts = null, payments = null, db = require("../web/server/db").get() } = opts;
   const defaultLang = lang.defaultLang(opts.defaultLang);
   const deskRO = deskAddress && abi.policyDesk ? new ethers.Contract(deskAddress, abi.policyDesk, provider) : null;
   const { PROVINCES } = require("../web/shared/districts");
@@ -89,8 +90,8 @@ function createUssd(opts) {
   let idHashes = new Set();
   const hasEvent = (name) => { try { return Boolean(ledgerRO.interface.getEvent(name)); } catch { return false; } };
   async function rebuildIndex() {
-    const evs = [...await ledgerRO.queryFilter(ledgerRO.filters.FarmerRegistered(), 0, "latest")];
-    if (hasEvent("FarmerPhoneChanged")) evs.push(...await ledgerRO.queryFilter(ledgerRO.filters.FarmerPhoneChanged(), 0, "latest"));
+    const evs = [...await queryEvents(ledgerRO, ledgerRO.filters.FarmerRegistered(), fromBlock)];
+    if (hasEvent("FarmerPhoneChanged")) evs.push(...await queryEvents(ledgerRO, ledgerRO.filters.FarmerPhoneChanged(), fromBlock));
     evs.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index);
     const byPhone = new Map(), phoneOf = new Map(), ids = new Set();
     for (const e of evs) {
@@ -208,13 +209,13 @@ function createUssd(opts) {
   async function claimStatus(env) {
     const s = env.s;
     const claims = [];
-    for (const e of await ledgerRO.queryFilter(ledgerRO.filters.ClaimFiled(null, null, env.addr), 0, "latest")) {
+    for (const e of await queryEvents(ledgerRO, ledgerRO.filters.ClaimFiled(null, null, env.addr), fromBlock)) {
       const id = Number(e.args.claimId);
       const c = await ledgerRO.getClaim(id);
       claims.push({ kind: "vet", at: e.blockNumber, id, label: fromB32(e.args.tagId), c, status: Number(c.status), policyId: Number(c.policyId) });
     }
     if (cropRO) {
-      for (const e of await cropRO.queryFilter(cropRO.filters.CropClaimFiled(null, null, env.addr), 0, "latest")) {
+      for (const e of await queryEvents(cropRO, cropRO.filters.CropClaimFiled(null, null, env.addr), fromBlock)) {
         const id = Number(e.args.claimId);
         const c = await cropRO.getClaim(id);
         claims.push({ kind: "crop", at: e.blockNumber, id, label: s.cropLoss, c, status: Number(c.status), policyId: Number(c.policyId) });
@@ -385,7 +386,7 @@ function createUssd(opts) {
 
   // Contracts the underwriter drafted for this farmer that can still be accepted, newest first.
   async function openOffers(addr) {
-    const evs = await deskRO.queryFilter(deskRO.filters.ContractDrafted(null, addr), 0, "latest");
+    const evs = await queryEvents(deskRO, deskRO.filters.ContractDrafted(null, addr), fromBlock);
     const ids = [...new Set(evs.map((e) => Number(e.args.applicationId)))].reverse();
     const now = await chainNow();
     const out = [];

@@ -54,6 +54,7 @@ const ussd = createUssd({
   ledgerAddress: dep.ledger,
   cropClaimsAddress: dep.cropClaims || null,
   deskAddress: dep.policyDesk || null,
+  fromBlock: dep.deployBlock || 0,
   agent,
   accounts,
   payments,
