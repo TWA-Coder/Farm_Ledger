@@ -1,0 +1,41 @@
+// FarmLedger - Who does what
+// Eraser: New diagram > "Flow Chart" > paste
+direction right
+
+Farmer [icon: user, color: green]
+Insurance agent [icon: user, color: blue]
+Insurance company [icon: briefcase, color: blue]
+Veterinarian [icon: activity, color: blue]
+Government [icon: flag, color: red]
+Weather and satellite data [icon: sun, color: orange]
+Mobile Money [icon: dollar-sign, color: orange]
+
+FarmLedger [color: lightblue] {
+  Sign up [shape: oval]
+  Apply for insurance [shape: oval]
+  Approve or turn down application [shape: oval]
+  Accept offer and pay [shape: oval]
+  Report a loss [shape: oval]
+  Check a claim [shape: oval]
+  Get paid [shape: oval]
+  Receive text updates [shape: oval]
+  Support premiums [shape: oval]
+}
+
+Farmer > Sign up
+Farmer > Accept offer and pay
+Farmer > Report a loss
+Farmer > Receive text updates
+Insurance agent > Apply for insurance: on behalf of the farmer
+Insurance company > Approve or turn down application
+Insurance company > Check a claim: crop losses
+Veterinarian > Check a claim: cattle deaths
+Government > Support premiums: pays part of the cost
+Weather and satellite data > Get paid: drought or flood pays automatically
+
+Apply for insurance > Approve or turn down application
+Approve or turn down application > Accept offer and pay
+Report a loss > Check a claim
+Check a claim > Get paid: if confirmed
+Accept offer and pay > Mobile Money
+Get paid > Mobile Money

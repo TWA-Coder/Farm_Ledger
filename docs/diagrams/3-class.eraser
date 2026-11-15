@@ -1,0 +1,58 @@
+// FarmLedger - The main information the system keeps
+// Eraser: New diagram > "Entity Relationship" > paste
+// Read each box as "a thing the system knows about", each line as "is linked to".
+
+Farmer [icon: user, color: green] {
+  Name
+  Phone number
+  District
+}
+
+Farm or animal [icon: map, color: green] {
+  Field location and crop
+  Or cow ear tag
+}
+
+Insurance agent [icon: user, color: blue] {
+  Name
+  Districts served
+}
+
+Insurance product [icon: package, color: blue] {
+  What it covers
+  Price
+  Payout rule
+}
+
+Application [icon: inbox, color: blue] {
+  Requested cover
+  Supporting documents
+  Decision
+}
+
+Policy [icon: file-text, color: violet] {
+  Amount covered
+  Price paid
+  Start and end dates
+  Status
+}
+
+Claim [icon: alert-triangle, color: red] {
+  What was lost
+  Evidence
+  Decision
+}
+
+Payment [icon: dollar-sign, color: orange] {
+  Amount
+  Mobile Money number
+}
+
+Farmer < Farm or animal: owns
+Insurance agent < Farmer: looks after
+Farmer < Application: applies through agent
+Insurance product < Application: chosen
+Application - Policy: becomes, once paid
+Farm or animal < Policy: is covered by
+Policy < Claim: raised on
+Policy < Payment: premium and payouts

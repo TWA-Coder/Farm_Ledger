@@ -1,0 +1,41 @@
+// FarmLedger - How the system fits together (big picture)
+// Eraser: New diagram > "Cloud Architecture" > paste
+direction right
+
+People [icon: users, color: green] {
+  Farmers [icon: user, color: green]
+  Insurance agents [icon: user, color: blue]
+  Insurance company [icon: briefcase, color: blue]
+  Veterinarians [icon: activity, color: blue]
+  Government [icon: flag, color: red]
+}
+
+Ways to use FarmLedger [icon: log-in, color: purple] {
+  Website [icon: monitor]
+  Basic phone menu and SMS [icon: phone]
+}
+
+FarmLedger [icon: shield, color: purple] {
+  Insurance service [icon: clipboard]
+  Weather and crop checker [icon: cloud-rain]
+  Tamper-proof shared record [icon: lock, color: violet]
+}
+
+Partners [icon: globe, color: orange] {
+  MTN Mobile Money [icon: dollar-sign, color: orange]
+  Weather and satellite data [icon: sun, color: orange]
+}
+
+Farmers > Website
+Farmers > Basic phone menu and SMS
+Insurance agents > Website: apply for farmers
+Insurance company > Website: approve and set prices
+Veterinarians > Website: confirm cattle deaths
+Government > Website: fund premium support
+
+Website > Insurance service
+Basic phone menu and SMS <> Insurance service: menus and text alerts
+Insurance service <> Tamper-proof shared record: saves every policy, claim and payment
+Weather and satellite data > Weather and crop checker
+Weather and crop checker > Tamper-proof shared record: rainfall and crop health
+Insurance service <> MTN Mobile Money: collect premiums, send payouts

@@ -1,0 +1,43 @@
+// FarmLedger - How a farmer gets insured and paid
+// Eraser: New diagram > "Sequence" > paste
+title From sign-up to payout
+autoNumber on
+
+Farmer [icon: user, color: green]
+Agent [icon: user, color: blue]
+Insurance company [icon: briefcase, color: blue]
+Vet [icon: activity, color: blue]
+FarmLedger [icon: shield, color: purple]
+Weather data [icon: sun, color: orange]
+Mobile Money [icon: dollar-sign, color: orange]
+
+Farmer > FarmLedger: Signs up by phone or website
+FarmLedger > Agent: Assigns a local agent
+Agent > FarmLedger: Applies for insurance with the farmer
+FarmLedger > Insurance company: Sends application for review
+Insurance company > FarmLedger: Approves and prepares an offer
+FarmLedger > Farmer: Text: your offer is ready
+Farmer > Mobile Money: Pays (government covers part of the cost)
+Mobile Money > FarmLedger: Payment confirmed
+FarmLedger > Farmer: Text: you are insured
+
+Weather data > FarmLedger: Regular rainfall and crop health readings
+
+alt [label: crops, bad weather detected, color: green] {
+  FarmLedger > Mobile Money: Pays the farmer automatically
+}
+else [label: cattle or other loss, farmer reports it, color: blue] {
+  Farmer > FarmLedger: Reports the loss
+  alt [label: cattle] {
+    FarmLedger > Vet: Vets check the claim
+    Vet > FarmLedger: Claim confirmed
+  }
+  else [label: crop loss] {
+    FarmLedger > Insurance company: Insurer staff check the claim
+    Insurance company > FarmLedger: Claim confirmed
+  }
+  FarmLedger > Mobile Money: Pays the farmer
+}
+
+Mobile Money > Farmer: Money received
+FarmLedger > Farmer: Text: payout sent
