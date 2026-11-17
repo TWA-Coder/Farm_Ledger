@@ -55,6 +55,35 @@ describe("SMS menu channel (Android SMS gateway)", function () {
     expect((await db.one("SELECT COUNT(*) n FROM sms_outbox WHERE kind = 'sms-menu' AND via = 'smsgate'")).n).to.equal(6);
   });
 
+  it("ignores our own messages coming back to the gateway (no SMS loop), one-time codes included", async () => {
+    const quiet = { log() {}, warn() {} };
+    channel = createSmsChannel({ db, ussd: { handle: async () => "CON Welcome to FarmLedger\n1. Register" }, outbox: createOutbox({ db, now: () => clock, logFile: null, quiet: true,
+      send: async (phone, t) => { out.push({ phone, text: t }); return { ok: true, providerId: "gw-" + out.length }; } }), signingKey: KEY, now: () => clock, log: quiet });
+    const OTHER = "250783000001";
+    await text("FL", OTHER);
+    const sent = out.length;
+    // the gateway receives the reply it just sent, from the other SIM in the same handset
+    expect((await webhook({ id: "e1", event: "sms:received", payload: { messageId: "e1", message: "Welcome to FarmLedger\n1. Register", sender: "+" + OTHER } })).body).to.equal("ignored: echo");
+    // a one-time code text: the outbox keeps it masked, the echo carries the real code
+    await createOutbox({ db, now: () => clock, logFile: null, quiet: true, send: async () => ({ ok: true }) }).sendNow(OTHER, "FarmLedger code: 123456. Valid 10 minutes.", { kind: "otp", secret: "123456" });
+    expect((await webhook({ id: "e2", event: "sms:received", payload: { messageId: "e2", message: "FarmLedger code: 123456. Valid 10 minutes.", sender: "+" + OTHER } })).body).to.equal("ignored: echo");
+    expect(out.length).to.equal(sent);
+  });
+
+  it("stops answering a number after SMS_MENU_MAX_REPLIES replies in 2 minutes", async () => {
+    channel = createSmsChannel({ db, ussd: { handle: async ({ text: t }) => `CON screen ${t}` }, outbox: createOutbox({ db, now: () => clock, logFile: null, quiet: true,
+      send: async (phone, t) => { out.push({ phone, text: t }); return { ok: true }; } }), signingKey: KEY, now: () => clock, log: { log() {}, warn() {} } });
+    const P = "250783000002";
+    for (let i = 0; i < 6; i++) await text(String(i), P);
+    const sent = out.length;
+    const r = await webhook({ id: "r7", event: "sms:received", payload: { messageId: "r7", message: "7", sender: "+" + P } });
+    expect(r.body).to.equal("ignored: rate");
+    expect(out.length).to.equal(sent);
+    clock += 2 * 60 * 1000 + 1; // later on, answered again
+    await text("8", P);
+    expect(out.length).to.equal(sent + 1);
+  });
+
   it("FL restarts at any time, and a conversation silent for 10 minutes starts over", async () => {
     await text("FL"); await text("1234"); await text("1234");
     expect((await text("2")).text).to.match(/no active cattle cover|Claim/);

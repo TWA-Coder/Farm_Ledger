@@ -12,6 +12,11 @@
 //   * ?key=<CALLBACK_TOKEN> on the URL (checked in ussd-http.js for anything arriving through the tunnel)
 //   * X-Signature = hex HMAC-SHA256(SMSGATE_SIGNING_KEY, rawBody + X-Timestamp), timestamp within 5 minutes
 //   * each webhook id is processed once (the app retries until it gets a 2xx, so duplicates are expected)
+// Loop guards (an SMS loop costs real money on the gateway SIM):
+//   * echo: an incoming SMS whose text is one FarmLedger itself sent in the last ECHO_MS (one-time codes compared with
+//     the code masked) is ignored. That happens when the gateway phone receives its own messages, e.g. a number in the
+//     same handset (dual SIM) was registered, and each reply would come back as a new "answer".
+//   * rate: at most SMS_MENU_MAX_REPLIES menu replies per number per 2 minutes; further SMS are recorded, not answered.
 // Trust note: the sender number of an SMS is set by the network, but SMS sender numbers can be spoofed on some
 // international routes. Actions still need the PIN, and account creation needs a code sent BACK to that number.
 const crypto = require("crypto");
@@ -20,6 +25,11 @@ const dbm = require("../web/server/db");
 const START = /^(fl|farmledger|menu|start)$/i;
 const SESSION_MS = Number(process.env.SMS_SESSION_MINUTES || 10) * 60 * 1000;
 const MAX_SKEW_S = 300;
+const ECHO_MS = 10 * 60 * 1000;
+const RATE_MS = 2 * 60 * 1000;
+const MAX_REPLIES = Number(process.env.SMS_MENU_MAX_REPLIES || 6);
+const norm = (t) => String(t || "").replace(/\r\n/g, "\n").trim();
+const masked = (t) => norm(t).replace(/\b\d{6}\b/g, "******"); // the outbox stores one-time codes masked
 
 function verifySignature({ raw, signature, timestamp, key, nowS }) {
   if (!signature || !timestamp) return { ok: false, reason: "missing X-Signature / X-Timestamp" };
@@ -30,7 +40,7 @@ function verifySignature({ raw, signature, timestamp, key, nowS }) {
   return ok ? { ok: true } : { ok: false, reason: "bad signature" };
 }
 
-function createSmsChannel({ db = dbm.get(), ussd, outbox, signingKey = process.env.SMSGATE_SIGNING_KEY || "", now = () => Date.now(), replyVia = "smsgate" }) {
+function createSmsChannel({ db = dbm.get(), ussd, outbox, signingKey = process.env.SMSGATE_SIGNING_KEY || "", now = () => Date.now(), replyVia = "smsgate", log = console }) {
   const digits = (p) => String(p || "").replace(/\D/g, "");
 
   // One SMS in, one screen out. The session is the list of answers so far, like a USSD session's text.
@@ -69,6 +79,19 @@ function createSmsChannel({ db = dbm.get(), ussd, outbox, signingKey = process.e
       const fresh = (await db.run("INSERT INTO sms_inbound (id, phone, text, received_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
         [id, phone, String(p.message || "").slice(0, 500), now()])).changes;
       if (!fresh) return { status: 200, body: "duplicate" }; // the app retried a webhook we already handled
+      const t = now();
+      const echo = await db.one("SELECT id FROM sms_outbox WHERE created_at > ? AND (text = ? OR text = ?) LIMIT 1", [t - ECHO_MS, norm(p.message), masked(p.message)]);
+      if (echo) {
+        await db.run("UPDATE sms_inbound SET reply = ? WHERE id = ?", ["(ignored: our own message came back)", id]);
+        log.warn(`[sms-menu] ignored an SMS from +${phone} that is one of our own messages: the gateway phone receives what it sends (a number in the same handset?)`);
+        return { status: 200, body: "ignored: echo" };
+      }
+      const recent = await db.one("SELECT COUNT(*) n FROM sms_outbox WHERE phone = ? AND kind = 'sms-menu' AND created_at > ?", [phone, t - RATE_MS]);
+      if (Number(recent.n) >= MAX_REPLIES) {
+        await db.run("UPDATE sms_inbound SET reply = ? WHERE id = ?", ["(not answered: reply limit)", id]);
+        log.warn(`[sms-menu] +${phone}: ${recent.n} replies in 2 minutes, not answering (SMS_MENU_MAX_REPLIES)`);
+        return { status: 200, body: "ignored: rate" };
+      }
       const reply = await converse(phone, p.message);
       await db.run("UPDATE sms_inbound SET reply = ? WHERE id = ?", [reply, id]);
       await outbox.sendNow(phone, reply, { kind: "sms-menu", via: replyVia });

@@ -74,6 +74,52 @@ npm run oracle             # weather/NDVI readings
 npm run web                # portal
 ```
 
+## 5. Hosting on a VM (Oracle Cloud Always Free)
+
+The public demo runs on one small VM (tested: Oracle Cloud AMD micro, 1 GB RAM, Ubuntu 24.04). Caddy serves the portal
+over HTTPS at `https://<ip-with-dashes>.sslip.io` (sslip.io turns the name into the IP, so no domain is needed), and
+systemd keeps the services running. The templates are in `deploy/vm/`.
+
+1. **Open ports 80 and 443 in Oracle's network:** OCI console > Networking > Virtual Cloud Networks > your VCN >
+   subnet > Default Security List > Add Ingress Rules: source `0.0.0.0/0`, TCP, destination port `80`, and again for
+   `443`. (`install.sh` opens them in the VM's own firewall.)
+2. **Prepare the VM** (as the `ubuntu` user):
+   ```bash
+   sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile   # 1 GB RAM is not enough to build the portal
+   # Node 22.5+ (e.g. NodeSource), Caddy (https://caddyserver.com/docs/install#debian-ubuntu-raspbian), cloudflared, iptables-persistent
+   git clone <repo> Farm_Ledger && cd Farm_Ledger && npm ci && npm --prefix web ci && npx hardhat compile
+   ```
+3. **Copy `.env` and `.env.polygonAmoy`** from your computer (`scp`); `.env.polygonAmoy` must also hold `CUSTODY_TOKEN`
+   (`openssl rand -hex 24`), which the portal and the phone services use to reach key custody.
+4. **Deploy and seed from the VM** (sections 2 and 3), so `deployments/polygonAmoy.json` and the seeded sign-ins
+   (`services/out/polygonAmoy-logins.txt`) are where the services run.
+5. **Install the services:** `sudo deploy/vm/install.sh <public-ip>`. It prints the portal address and the USSD
+   callback URL for Africa's Talking.
+
+| Unit | Runs |
+|---|---|
+| `farmledger-bundler` | `services/bundler.js` (loopback only) |
+| `farmledger-phone` | key custody, USSD/SMS service, notifier (`services/run-phone.js`) |
+| `farmledger-web` | the portal, `next start` on 127.0.0.1:3000 (run `next build` again after changing `web/`) |
+| `farmledger-tunnel` | Cloudflare quick tunnel to the USSD service, for Africa's Talking |
+
+Logs: `journalctl -u farmledger-<name>`; requests: `/var/log/caddy/farmledger-access.log`.
+
+What we ran into:
+
+- **Africa's Talking refuses sslip.io callback URLs** ("A valid web URL is needed", without ever calling the server),
+  even with no key in them. The USSD callback therefore goes through the Cloudflare tunnel:
+  `https://<name>.trycloudflare.com/ussd?key=<CALLBACK_TOKEN>`. **That address changes whenever
+  `farmledger-tunnel` restarts** (also after a reboot); get the new one with
+  `journalctl -u farmledger-tunnel | grep trycloudflare | tail -1` and paste it into Africa's Talking again. A fixed
+  address needs a domain on Cloudflare (a named tunnel).
+- **The oracle is not a service on Amoy:** `oracle.js watch` posts a reading for every plot every 60 s and would drain
+  the oracle key's POL within hours. Trigger readings when needed: `node services/oracle.js scenario drought 1`.
+- **The portal's phone simulator (`/ussd`)** goes through the portal (`/api/ussd-sim`) and, off the local chain, only
+  dials the demo numbers `25078800xxxx`, so a visitor cannot act as a real farmer's phone.
+- **SMS:** a phone on your home Wi-Fi (e.g. a local-mode SMS gateway) is not reachable from the VM. Use Africa's Talking
+  or SMS Gateway for Android in cloud mode (docs/PHONE_AND_SMS.md).
+
 ## Differences from the local chain
 
 - **No one key holds every role.** `scripts/deploy.js` refuses to deploy until every role address is set.

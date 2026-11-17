@@ -15,7 +15,7 @@ export async function POST(request) {
   const form = new URLSearchParams(await request.text());
   const phone = String(form.get("phoneNumber") || "").replace(/\D/g, "");
   if (!local() && !DEMO_NUMBER.test(phone)) {
-    return new Response("END On this public demo the simulator only dials the demo numbers (+25078800xxxx).", { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    return new Response(`END On this public demo the simulator only dials the demo numbers (+25078800xxxx), not +${phone || "?"}.`, { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } });
   }
   const port = Number(process.env.USSD_PORT || 4000);
   try {

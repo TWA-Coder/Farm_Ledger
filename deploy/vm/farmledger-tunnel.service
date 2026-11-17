@@ -1,0 +1,15 @@
+[Unit]
+Description=FarmLedger Cloudflare quick tunnel to the USSD service (@NETWORK@)
+After=network-online.target farmledger-phone.service
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+Environment=NETWORK=@NETWORK@
+ExecStart=@NODE@ services/tunnel.js
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

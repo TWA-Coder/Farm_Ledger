@@ -1,0 +1,17 @@
+[Unit]
+Description=FarmLedger key custody + USSD/SMS + notifier (@NETWORK@)
+After=network-online.target farmledger-bundler.service
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+Environment=NETWORK=@NETWORK@
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=384
+ExecStart=@NODE@ services/run-phone.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

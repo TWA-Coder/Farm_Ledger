@@ -9,6 +9,9 @@ Everything runs on your computer: a local blockchain, the web portal and the pho
 ## Video link
 Link: https://www.awesomescreenshot.com/video/58175426?key=6f2bd69d5f89b78570f20686baab9eb0
 
+## APP LINK
+link: https://155-248-230-250.sslip.io/
+
 ## Requirements
 
 | | macOS | Windows |

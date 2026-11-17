@@ -1,0 +1,13 @@
+# FarmLedger public demo (Polygon Amoy) behind Caddy. install.sh writes this to /etc/caddy/Caddyfile with @HOST@
+# replaced by <public-ip-with-dashes>.sslip.io (and a farmledger-<ip> alias). Caddy fetches the HTTPS certificate itself.
+@HOST@, farmledger-@HOST@ {
+	encode gzip
+	log {
+		output file /var/log/caddy/farmledger-access.log
+	}
+	# SMS delivery reports -> USSD/SMS service (needs the key). USSD callbacks come through the Cloudflare tunnel
+	# (farmledger-tunnel): Africa's Talking refused sslip.io URLs. /ussd here is the portal's simulator page.
+	@phone path /sms/*
+	reverse_proxy @phone 127.0.0.1:4000
+	reverse_proxy 127.0.0.1:3000
+}

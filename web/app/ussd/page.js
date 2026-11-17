@@ -41,6 +41,10 @@ export default function UssdChannel() {
     setBusy(false);
   }
 
+  // A new number starts a new phone: clear the previous number's screen, so an old reply is never read as this one's.
+  function pickPhone(n) {
+    setPhone(n); setInputs([]); setLog([]); setValue(""); setScreen(""); setLive(false);
+  }
   function dial() {
     sid.current = "sim-" + Date.now();
     setInputs([]); setLog([]); setValue("");
@@ -67,11 +71,11 @@ export default function UssdChannel() {
         <div className="two">
           <Box title="Handset simulator" sub="Behaves like a basic phone without internet. Dial, then answer with numbers.">
             <label htmlFor="ph">Phone number</label>
-            <select id="ph" value={phone} onChange={(e) => setPhone(e.target.value)}>
+            <select id="ph" value={phone} onChange={(e) => pickPhone(e.target.value)}>
               {PHONES.map((p) => <option key={p.n} value={p.n}>{p.label} · +{p.n}</option>)}
             </select>
             <label htmlFor="ph2">Or type any number</label>
-            <input id="ph2" value={phone} onChange={(e) => setPhone(e.target.value.replace(/\D/g, ""))} inputMode="numeric" />
+            <input id="ph2" value={phone} onChange={(e) => pickPhone(e.target.value.replace(/\D/g, ""))} inputMode="numeric" />
             <p><button className="btn" onClick={dial} disabled={busy}>Dial *384*55#</button></p>
             <div className="handset" aria-live="polite">
               {screen || "Press Dial to start."}

@@ -1,0 +1,17 @@
+[Unit]
+Description=FarmLedger ERC-4337 bundler (@NETWORK@)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+Environment=NETWORK=@NETWORK@
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=384
+ExecStart=@NODE@ services/bundler.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -12,3 +12,4 @@ web/node_modules/
 .env.example
 # network overlays and backups of .env hold private keys
 .env.*
+.*

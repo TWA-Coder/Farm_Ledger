@@ -1,0 +1,17 @@
+[Unit]
+Description=FarmLedger portal (@NETWORK@)
+After=network-online.target farmledger-phone.service
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@/web
+Environment=NETWORK=@NETWORK@
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=384
+ExecStart=@DIR@/web/node_modules/.bin/next start -p 3000 -H 127.0.0.1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
