@@ -20,7 +20,7 @@
 const http = require("http");
 const { ethers } = require("ethers");
 const { loadDeployment, loadAbi } = require("./common");
-const { createUssd } = require("./ussd-core");
+const { createUssd, keepDemoCodes } = require("./ussd-core");
 const { createHandler } = require("./ussd-http");
 const { createSmsChannel } = require("./sms-channel");
 const { paymentsFromEnv } = require("./payments");
@@ -38,7 +38,8 @@ if (!agentKey) throw new Error("Set AGENT_PRIVATE_KEY (the key that holds CLAIMS
 const agent = new ethers.Wallet(agentKey, provider);
 
 const outbox = createOutbox({ localChain: local });
-const sendSms = (phone, text, opts) => outbox.sendNow(phone, text, opts);
+// Codes for the seeded demo numbers, which are never texted live, are shown on the registration screen (ussd-core.js).
+const { sendSms, demoCode } = keepDemoCodes((phone, text, opts) => outbox.sendNow(phone, text, opts));
 const accounts = dep.aa && process.env.PHONE_ACCOUNTS !== "off"
   ? createPhoneAccounts({ provider, aa: dep.aa, ledgerAddress: dep.ledger, deskAddress: dep.policyDesk, abi: loadAbi(), sendSms,
     ...(process.env.CUSTODY_URL ? { custody: { url: process.env.CUSTODY_URL, token: process.env.CUSTODY_TOKEN } } : { secret: loadSecret({ local }) }) })
@@ -58,6 +59,7 @@ const ussd = createUssd({
   agent,
   accounts,
   payments,
+  demoCode,
 });
 
 (async () => {
@@ -81,6 +83,8 @@ server.on("error", (e) => {
   process.exit(1);
 });
 server.listen(port, () => {
+  const t0 = Date.now();
+  ussd.warm().then(() => console.log(`  registrations read in ${Date.now() - t0} ms`), (e) => console.warn("  could not read registrations yet:", e.shortMessage || e.message));
   console.log(`USSD service on http://localhost:${port}/ussd  (demo farmers: 250788000001 Aline, 250788000002 Jean)`);
   console.log(`  SMS: ${outbox.describe} · internet callbacks: ${TOKEN ? "need ?key=CALLBACK_TOKEN" : "REFUSED (set CALLBACK_TOKEN to accept them)"}`);
   console.log(outbox.gatewayReady

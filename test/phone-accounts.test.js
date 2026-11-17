@@ -9,7 +9,7 @@ const uo = require("../web/shared/userop");
 const dbm = require("../web/server/db");
 const contacts = require("../web/server/contacts");
 const profiles = require("../web/server/profiles");
-const { createUssd } = require("../services/ussd-core");
+const { createUssd, keepDemoCodes } = require("../services/ussd-core");
 const { createPhoneAccounts, CODE_TRIES } = require("../services/phone-accounts");
 
 const NEW = "250788000500";   // a farmer with only a basic phone
@@ -168,6 +168,23 @@ describe("Phone accounts (server-held key, USSD + SMS)", function () {
       u = createUssd({ provider: ethers.provider, abi, ledgerAddress: ctx.ledgerAddr, agent: ctx.agent, accounts, db });
       expect(await dial(NEW, ["1", NID, NAME, "1"])).to.equal("END We could not send the SMS code to this number right now. Please try again later.");
       expect(await dial(NEW, [])).to.equal("CON Welcome to FarmLedger\n1. Register\n2. I changed my number\n0. Ikinyarwanda");
+    });
+
+    it("a seeded demo number (never texted live) gets its registration code on the screen, and can finish", async () => {
+      const DEMO = "250788000201";
+      const keeper = keepDemoCodes(async () => ({ ok: false, skipped: true })); // what the outbox does for a demo number
+      accounts = createPhoneAccounts({
+        db, provider: ethers.provider, aa: ctx.aa, ledgerAddress: ctx.ledgerAddr, abi, secret,
+        sendSms: keeper.sendSms, transport: transport(ctx.entryPoint, ctx.relayer), now: () => clock,
+      });
+      u = createUssd({ provider: ethers.provider, abi, ledgerAddress: ctx.ledgerAddr, agent: ctx.agent, accounts, db, demoCode: keeper.demoCode });
+      const reply = await dial(DEMO, ["1", NID, NAME, "1"]);
+      expect(reply).to.match(/^END Demo number, so no SMS is sent\. Your code: \d{6}\n/);
+      const code = /code: (\d{6})/.exec(reply)[1];
+      expect(await dial(DEMO, [code])).to.match(/^CON Registered!/);
+      expect((await accounts.accountOf(DEMO)).status).to.equal("active");
+      // any other number is unaffected: still "could not send"
+      expect(await dial("250722000777", ["1", "1199080099999999", NAME, "1"])).to.equal("END We could not send the SMS code to this number right now. Please try again later.");
     });
 
     it("a registration that fails on-chain leaves no key behind", async () => {

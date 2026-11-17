@@ -52,7 +52,7 @@ const END = (m) => "END " + m;
 const WRITE_SURFACE = ["fileClaimFor"]; // the ONLY state-changing call this service can make
 
 function createUssd(opts) {
-  const { provider, abi, ledgerAddress, cropClaimsAddress = null, deskAddress = null, fromBlock = 0, agent, accounts = null, payments = null, db = require("../web/server/db").get() } = opts;
+  const { provider, abi, ledgerAddress, cropClaimsAddress = null, deskAddress = null, fromBlock = 0, agent, accounts = null, payments = null, demoCode = () => null, db = require("../web/server/db").get() } = opts;
   const defaultLang = lang.defaultLang(opts.defaultLang);
   const deskRO = deskAddress && abi.policyDesk ? new ethers.Contract(deskAddress, abi.policyDesk, provider) : null;
   const { PROVINCES } = require("../web/shared/districts");
@@ -254,6 +254,8 @@ function createUssd(opts) {
     : { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }); // no English month names
   async function resend(env, purpose) {
     const r = await accounts.resendCode(env.phone, purpose);
+    const shown = r.ok && demoCode(env.phone); // a demo number's code is shown on registration screens only
+    if (shown && purpose === "register") return END(env.s.demoCode(shown));
     return END(r.ok ? env.s.codeResent : codeLimit(env.s, r));
   }
   const toIntl = (v) => { const d = normalize(v); return /^07\d{8}$/.test(d) ? "25" + d : d; };
@@ -307,7 +309,8 @@ function createUssd(opts) {
     // only the hash of the ID is kept, and only until the code is used
     const r = await accounts.sendCode(env.phone, "register", { idHash: hashOf(nid), district: district && district.toUpperCase(), name });
     if (!r.ok) return END(codeLimit(s, r));
-    return END(s.codeSent);
+    const shown = demoCode(env.phone); // a seeded demo number: no SMS can reach it, so the screen shows the code
+    return END(shown ? s.demoCode(shown) : s.codeSent);
   }
 
   async function finishRegistration(env, consumed) {
@@ -539,7 +542,26 @@ function createUssd(opts) {
     return reply;
   }
 
-  return { handle, hashOf, writeSurface: WRITE_SURFACE, agentAddress: agent.address };
+  // warm(): read the registrations once at start-up, so the first caller does not wait for the scan (event-query.js)
+  return { handle, hashOf, writeSurface: WRITE_SURFACE, agentAddress: agent.address, warm: rebuildIndex };
 }
 
-module.exports = { createUssd, WRITE_SURFACE };
+// The seeded demo numbers (25078800xxxx) are never texted live (services/sms.js), and on a public deployment they are
+// the only numbers the portal's simulator dials, so a demo number could never finish registering. keepDemoCodes wraps
+// the SMS sender: a code that was skipped for a demo number is kept instead and counts as sent; createUssd's demoCode
+// option hands it to the registration screens (only those: a PIN-reset or number-change code is never shown).
+// Every other number, and every other message, goes through unchanged.
+const DEMO_NUMBER = /^25078800\d{4}$/;
+function keepDemoCodes(send) {
+  const codes = new Map(); // phone -> code
+  return {
+    async sendSms(phone, text, opts = {}) {
+      const r = await send(phone, text, opts);
+      if (r && r.skipped && opts.secret && DEMO_NUMBER.test(String(phone))) { codes.set(String(phone), opts.secret); return { ok: true, shown: true }; }
+      return r;
+    },
+    demoCode(phone) { const c = codes.get(String(phone)) || null; codes.delete(String(phone)); return c; },
+  };
+}
+
+module.exports = { createUssd, keepDemoCodes, WRITE_SURFACE };
