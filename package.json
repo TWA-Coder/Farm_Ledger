@@ -24,7 +24,9 @@
     "slither": "slither . --hardhat-ignore-compile --filter-paths node_modules",
     "web:install": "npm --prefix web install",
     "web": "npm --prefix web run dev",
-    "tunnel": "node services/tunnel.js"
+    "tunnel": "node services/tunnel.js",
+    "sus": "node scripts/sus-score.js",
+    "translations": "node scripts/export-translations.js"
   },
   "devDependencies": {
     "@account-abstraction/contracts": "0.7.0",

@@ -26,10 +26,13 @@ async function timed(txPromise) {
 }
 
 async function main() {
-  const [admin, uw, oracle, vet, ...farmers] = await ethers.getSigners();
-  const token = await (await ethers.getContractFactory("MockRWF")).deploy();
+  const [admin, uw, oracle, vet, issuer, ...farmers] = await ethers.getSigners();
+  const token = await (await ethers.getContractFactory("MockRWF")).deploy(true);
   const ledger = await (await ethers.getContractFactory("FarmLedger")).deploy(admin.address, await token.getAddress());
   const addr = await ledger.getAddress();
+  await ledger.grantRole(await ledger.VET_REGISTRAR_ROLE(), admin.address);
+  // issuer stands in for PolicyDesk, which issues policies once the farmer has accepted
+  await ledger.grantRole(await ledger.ISSUER_ROLE(), issuer.address);
   await ledger.grantRole(await ledger.UNDERWRITER_ROLE(), uw.address);
   await ledger.grantRole(await ledger.ORACLE_ROLE(), oracle.address);
   await ledger.certifyVet(vet.address, ethers.id("BENCH-LIC"), ethers.encodeBytes32String("BUGESERA"), Math.floor(Date.now() / 1000) + 31536000);
@@ -59,12 +62,12 @@ async function main() {
     const animalId = Number(await ledger.animalCount());
 
     // crop path
-    m.buyCrop.push((await timed(ledger.connect(f).buyPolicy(1, plotId, 200_000))).gas);
+    m.buyCrop.push((await timed(ledger.connect(issuer).issuePolicy(f.address, 1, plotId, 200_000, 0, 0, 120, ethers.ZeroHash))).gas);
     const trig = await timed(ledger.connect(oracle).postReading(plotId, 0, 500, await time.latest()));
     m.payoutCrop.push(trig.gas); lat.crop.push(trig.ms);
 
     // livestock path
-    m.buyLive.push((await timed(ledger.connect(f).buyPolicy(2, animalId, 200_000))).gas);
+    m.buyLive.push((await timed(ledger.connect(issuer).issuePolicy(f.address, 2, animalId, 200_000, 0, 0, 365, ethers.ZeroHash))).gas);
     const polId = Number(await ledger.policyCount());
     m.fileClaim.push((await timed(ledger.connect(f).fileClaim(polId, h("dead" + i)))).gas);
     const claimId = Number(await ledger.claimCount());
@@ -107,7 +110,8 @@ async function main() {
     `| Metric | Manual (NAIS) | FarmLedger |`, `|---|---|---|`,
     `| Claim settlement | 90-180 days | seconds-minutes (one transaction after the trigger / vet signature) |`,
     `| Settlement cost for a USD ${(premiumRwf / RWF_PER_USD).toFixed(0)} premium | 30-45% of premium (loss adjustment) | ~${overheadPct.toFixed(2)}% of premium (gas only, assumed prices) |`,
-    `| Fraud controls | paper checks | unique ear-tag registry, vet signature, waiting period, one policy per animal |`);
+    `| Fraud controls | paper checks | unique ear-tag registry, vet signature, waiting period, one policy per animal |`,
+    ``, `The manual (NAIS) figures are the estimates from the proposal and still need a cited source before they are used as evidence.`);
 
   const out = path.join(__dirname, "results.md");
   fs.writeFileSync(out, lines.join("\n") + "\n");

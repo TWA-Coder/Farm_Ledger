@@ -37,7 +37,7 @@ Real money, KYC, regulatory licensing, mainnet, custom IoT hardware (as in the p
 1. **FR-07 and FR-08 are identical.** Proposed FR-08: *"The system shall register the claim against the animal's ear-tag ID and reject duplicate or already-deceased animals."* (implemented: unique tag registry, one policy per animal, `deceased` flag).
 2. **NFR-01 (<= 15 s)**: define it as contract execution after the trigger (measured by the benchmark). Oracle data latency is separate and not guaranteed by the chain.
 3. **NFR-02 (<= USD 0.05)** is shown as gas x an assumed L2 gas price (parameters in `benchmark/benchmark.js`), not a measured testnet fee.
-4. **NFR-04 (99.5% uptime) and NFR-05 (SUS >= 80)** cannot be shown in a day: report as targets with the measurement plan (uptime monitor on the oracle/web; SUS survey with 5+ farmers/vets during the field visits in the budget).
+4. **NFR-04 (99.5% uptime) and NFR-05 (SUS >= 80)** cannot be shown in a day: report as targets with the measurement plan (uptime monitor on the oracle/web; SUS survey with 5+ farmers/vets during the field visits in the budget). The SUS protocol and scoring script are in [research/SUS-usability-test.md](research/SUS-usability-test.md) (`npm run sus`); the Kinyarwanda texts export for native-speaker review with `npm run translations`.
 5. Figure/table numbering in Chapter 3 does not match the list of figures (Figure 3.6 appears twice; the list says 3.3 and 3.4).
 6. Added design decisions worth a paragraph in Chapter 3: full-sum reservation per policy (solvency), a 7-day livestock waiting period (moral hazard), signer != claimant, EIP-712 attestation bound to claim, decision and deadline (anti-replay), personal data only as hashes.
 
